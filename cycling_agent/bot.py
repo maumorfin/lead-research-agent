@@ -3,7 +3,6 @@ import html
 import logging
 import os
 import sys
-import time
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 from rich.console import Console
@@ -29,8 +28,6 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 _thread_pool = ThreadPoolExecutor(max_workers=4)
-_status_cache: dict = {"data": None, "ts": 0.0}
-CACHE_TTL = 3600
 
 
 def _run_pipeline(question: str) -> CyclingAnswer:
@@ -99,11 +96,6 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    now = time.time()
-    if _status_cache["data"] and (now - _status_cache["ts"]) < CACHE_TTL:
-        await update.message.reply_text(_status_cache["data"], parse_mode=ParseMode.HTML)
-        return
-
     await context.bot.send_chat_action(
         chat_id=update.effective_chat.id, action=ChatAction.TYPING
     )
@@ -125,8 +117,6 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         else:
             text = "⚠️ Could not fetch live standings. Try asking: <i>Who leads the WorldTour?</i>"
 
-        _status_cache["data"] = text
-        _status_cache["ts"] = now
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     except Exception as e:
