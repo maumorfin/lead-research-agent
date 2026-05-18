@@ -11,6 +11,7 @@ class CyclingToolType(str, Enum):
     PCS_RIDER_RESULTS = "pcs_rider_results"
     SEARCH = "search"
     SCRAPE = "scrape"
+    FIRECRAWL = "firecrawl"
 
 
 class ResearchStep(BaseModel):

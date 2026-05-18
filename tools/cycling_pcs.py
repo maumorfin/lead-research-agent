@@ -30,12 +30,12 @@ def _to_results(search_results) -> list[dict]:
 
 
 def get_individual_ranking(top_n: int = 20) -> list[dict]:
-    results = search(f"UCI WorldTour individual rider ranking top {top_n} 2025 points standings")
+    results = search(f"UCI WorldTour individual rider ranking top {top_n} 2026 points standings")
     return _to_results(results)
 
 
 def get_team_ranking(top_n: int = 20) -> list[dict]:
-    results = search(f"UCI WorldTour team ranking top {top_n} 2025 points standings")
+    results = search(f"UCI WorldTour team ranking top {top_n} 2026 points standings")
     return _to_results(results)
 
 
@@ -47,7 +47,7 @@ def get_rider_profile(rider_slug: str) -> dict:
 
 def get_rider_results(rider_slug: str, year: int | None = None) -> list[dict]:
     name = _slug_to_name(rider_slug)
-    year_str = str(year) if year else "2025"
+    year_str = str(year) if year else "2026"
     results = search(f"{name} cycling race results {year_str} victories podiums")
     return _to_results(results)
 
