@@ -1,7 +1,12 @@
-from anthropic import Anthropic
+import os
+import json
+from openai import OpenAI
 from models.answer import CyclingAnswer
 
-client = Anthropic()
+client = OpenAI(
+    api_key=os.environ["GROQ_API_KEY"],
+    base_url="https://api.groq.com/openai/v1",
+)
 
 SYSTEM_PROMPT = """You are a knowledgeable professional cycling commentator and analyst.
 You have been given raw data fetched from procyclingstats.com and web searches.
@@ -14,8 +19,8 @@ Guidelines:
 - Suggest 2-3 relevant follow-up questions the user would genuinely find interesting
 - Keep the main answer concise but complete (3-6 sentences for simple questions)
 - Set confidence to "low" if data seems outdated, incomplete, or contradictory
-- Set confidence to "high" only when you have complete, structured PCS data
-- Always fill source_note with where the data came from (e.g. "procyclingstats.com" or "web search")"""
+- Set confidence to "high" only when you have complete, structured data
+- Always fill source_note with where the data came from"""
 
 
 def synthesize(question: str, raw_findings: dict[str, str]) -> CyclingAnswer:
@@ -25,25 +30,28 @@ def synthesize(question: str, raw_findings: dict[str, str]) -> CyclingAnswer:
 
     tools = [
         {
-            "name": "submit_cycling_answer",
-            "description": "Submit the final structured cycling answer",
-            "input_schema": CyclingAnswer.model_json_schema(),
+            "type": "function",
+            "function": {
+                "name": "submit_cycling_answer",
+                "description": "Submit the final structured cycling answer",
+                "parameters": CyclingAnswer.model_json_schema(),
+            },
         }
     ]
 
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=3000,
-        system=SYSTEM_PROMPT,
-        tools=tools,
-        tool_choice={"type": "any"},
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
         messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": f"Question: {question}\n\nResearch findings:\n\n{findings_text}",
-            }
+            },
         ],
+        tools=tools,
+        tool_choice="required",
     )
 
-    tool_block = next(b for b in response.content if b.type == "tool_use")
-    return CyclingAnswer(**tool_block.input)
+    tool_call = response.choices[0].message.tool_calls[0]
+    data = json.loads(tool_call.function.arguments)
+    return CyclingAnswer(**data)
