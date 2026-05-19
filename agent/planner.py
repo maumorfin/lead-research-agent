@@ -44,6 +44,35 @@ Common race slug reference:
 """
 
 
+_PLAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "question": {"type": "string", "description": "The original user question"},
+        "steps": {
+            "type": "array",
+            "description": "2 to 5 targeted research steps",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "step_id": {"type": "integer"},
+                    "description": {"type": "string", "description": "What this step is trying to find out"},
+                    "tool": {
+                        "type": "string",
+                        "enum": [
+                            "pcs_ranking", "pcs_rider", "pcs_race", "pcs_stage",
+                            "pcs_startlist", "pcs_rider_results", "search", "scrape", "firecrawl",
+                        ],
+                    },
+                    "query": {"type": "string", "description": "Slug, URL, or search string — see format per tool in system prompt"},
+                },
+                "required": ["step_id", "description", "tool", "query"],
+            },
+        },
+    },
+    "required": ["question", "steps"],
+}
+
+
 def create_plan(question: str) -> ResearchPlan:
     tools = [
         {
@@ -51,7 +80,7 @@ def create_plan(question: str) -> ResearchPlan:
             "function": {
                 "name": "submit_research_plan",
                 "description": "Submit the structured research plan for execution",
-                "parameters": ResearchPlan.model_json_schema(),
+                "parameters": _PLAN_SCHEMA,
             },
         }
     ]
