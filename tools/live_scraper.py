@@ -4,6 +4,7 @@ from firecrawl import V1FirecrawlApp
 LIVE_SOURCES = {
     "pcs_live": "https://www.procyclingstats.com/race/{race_slug}/{year}/live",
     "pcs_stage": "https://www.procyclingstats.com/race/{race_slug}/{year}/stage-{stage}",
+    "pcs_stage_live": "https://www.procyclingstats.com/race/{race_slug}/{year}/stage-{stage}/live",
     "pcs_gc": "https://www.procyclingstats.com/race/{race_slug}/{year}/gc",
     "pcs_ranking": "https://www.procyclingstats.com/rankings/me/individual",
     "eurosport": "https://www.eurosport.com/cycling/",
@@ -38,6 +39,11 @@ def scrape_pcs_live(race_slug: str, year: int) -> str:
 
 def scrape_pcs_stage(race_slug: str, year: int, stage_num: int) -> str:
     url = LIVE_SOURCES["pcs_stage"].format(race_slug=race_slug, year=year, stage=stage_num)
+    return scrape_live_page(url)
+
+
+def scrape_pcs_stage_live(race_slug: str, year: int, stage_num: int) -> str:
+    url = LIVE_SOURCES["pcs_stage_live"].format(race_slug=race_slug, year=year, stage=stage_num)
     return scrape_live_page(url)
 
 

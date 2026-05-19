@@ -11,7 +11,7 @@ from tools.cycling_pcs import (
 )
 from tools.web_search import search
 from tools.web_scraper import scrape
-from tools.live_scraper import scrape_live_page, scrape_pcs_live, scrape_pcs_stage, scrape_pcs_gc, scrape_pcs_ranking
+from tools.live_scraper import scrape_live_page, scrape_pcs_live, scrape_pcs_stage, scrape_pcs_stage_live, scrape_pcs_gc, scrape_pcs_ranking
 
 
 def execute_plan(plan: ResearchPlan) -> dict[str, str]:
@@ -90,6 +90,13 @@ def execute_plan(plan: ResearchPlan) -> dict[str, str]:
                     race_slug = parts[1]
                     year = int(parts[2]) if len(parts) > 2 else 2026
                     findings[step.description] = scrape_pcs_gc(race_slug, year)
+
+                elif query.startswith("stage-live/"):
+                    parts = query.split("/")
+                    race_slug = parts[1]
+                    year = int(parts[2]) if len(parts) > 2 else 2026
+                    stage_num = int(parts[3]) if len(parts) > 3 else 1
+                    findings[step.description] = scrape_pcs_stage_live(race_slug, year, stage_num)
 
                 elif query.startswith("stage/"):
                     parts = query.split("/")
