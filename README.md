@@ -176,6 +176,17 @@ jupyter notebook playground.ipynb
 
 ---
 
+## Other Branches
+
+This repo has two more agents on separate branches — same Plan & Execute pattern, different domain.
+
+| Branch | What it is |
+|---|---|
+| [`cycling-agent`](../../tree/cycling-agent) | **Pro Cycling Intelligence Agent** — answers natural language questions about professional cycling via a Telegram bot or CLI. Uses Claude (Anthropic) for planning and synthesis, Tavily for web search, and Firecrawl for live JS-rendered race pages. |
+| [`groq-migration`](../../tree/groq-migration) | Same cycling agent with the LLM swapped from Claude to **Llama 3.3 70b on Groq** via the OpenAI-compatible SDK. Faster and free to run. |
+
+---
+
 ## License
 
 MIT
