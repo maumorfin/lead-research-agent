@@ -2,16 +2,18 @@
 
 A conversational AI agent that answers natural language questions about professional cycling — standings, race results, rider profiles, stage data, and live race updates — delivered via a Telegram bot or CLI.
 
-Built with the **Plan & Execute** agent pattern using Claude, Tavily, and Firecrawl.
+Built with the **Plan & Execute** agent pattern. Supports **Claude Sonnet 4**, **Claude Haiku 4.5**, and **Llama 3.3 70b on Groq** — switchable live inside Telegram with a single tap.
+
+> **Branch:** `feature/model-fusion` — unified multi-model support. Switch between Claude Sonnet, Claude Haiku, and Groq Llama 3.3 per chat session without restarting.
 
 ---
 
 ## What It Does
 
 Ask it anything about pro cycling and it will:
-1. **Plan** — Claude decides which tools to use and in what order
+1. **Plan** — the active LLM decides which tools to use and in what order
 2. **Execute** — fetches data using the right tool for the job (no AI in this step)
-3. **Synthesize** — Claude turns raw findings into a clear, structured answer
+3. **Synthesize** — the active LLM turns raw findings into a clear, structured answer
 
 ---
 
@@ -22,22 +24,34 @@ Question
     │
     ▼
 ┌──────────┐
-│ PLANNER  │  Claude generates a 2–5 step research plan
+│ PLANNER  │  Active model generates a 2–5 step research plan
 └────┬─────┘
      │
      ▼
 ┌──────────┐
-│ EXECUTOR │  Runs each step — Tavily search, Firecrawl scrape, or static scrape (no AI)
+│ EXECUTOR │  Runs each step — Tavily search, Firecrawl/Playwright scrape, or static scrape (no AI)
 └────┬─────┘
      │
      ▼
 ┌──────────────┐
-│ SYNTHESIZER  │  Claude reads findings and returns a typed CyclingAnswer
+│ SYNTHESIZER  │  Active model reads findings and returns a typed CyclingAnswer
 └────┬─────────┘
      │
      ▼
  CyclingAnswer ✓
 ```
+
+---
+
+## Models
+
+Switch models live in Telegram with the **⚙️ Change Model** button or the `/model` command. Each chat session remembers its own choice independently.
+
+| Key | Model | Provider | Notes |
+|---|---|---|---|
+| `sonnet` | `claude-sonnet-4-6` | Anthropic | Default — best quality |
+| `haiku` | `claude-haiku-4-5-20251001` | Anthropic | Faster and cheaper |
+| `groq` | `llama-3.3-70b-versatile` | Groq | Free tier, very fast |
 
 ---
 
@@ -55,9 +69,9 @@ The agent picks the right tool automatically based on the question:
 | `pcs_rider_results` | Rider's season results | Tavily web search |
 | `search` | News, recent updates, general info | Tavily web search |
 | `scrape` | Static HTML pages | httpx + BeautifulSoup |
-| `firecrawl` | Live race data happening right now | Firecrawl headless browser |
+| `firecrawl` | Live race data happening right now | Firecrawl headless browser + Playwright |
 
-**Firecrawl** is reserved for mid-race live data (live ticker, gaps, km remaining). For everything else — standings, recent results, news — Tavily handles it.
+**Firecrawl** is reserved for mid-race live data. When you ask about the current race situation, groups, or time gaps, it uses **Playwright** (headless Chromium) to scrape the live PCS page and returns real-time rider groups, time gaps, and timeline updates. Firecrawl is the fallback if Playwright times out.
 
 ---
 
@@ -65,19 +79,19 @@ The agent picks the right tool automatically based on the question:
 
 ```bash
 # 1. Clone and install
-python -m venv venv
-source venv/bin/activate      # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+playwright install chromium
 
 # 2. Get your API keys
 # - Anthropic: https://console.anthropic.com
-# - Tavily: https://tavily.com
-# - Firecrawl: https://firecrawl.dev (500 pages/month free)
-# - Telegram: message @BotFather → /newbot → copy the token
+# - Groq:      https://console.groq.com  (free)
+# - Tavily:    https://tavily.com
+# - Firecrawl: https://firecrawl.dev     (500 pages/month free)
+# - Telegram:  message @BotFather → /newbot → copy the token
 
 # 3. Configure
 cp .env.example .env
-# Fill in all four keys in .env
+# Fill in ANTHROPIC_API_KEY, GROQ_API_KEY, TAVILY_API_KEY, FIRECRAWL_API_KEY, TELEGRAM_BOT_TOKEN
 
 # 4. Test via CLI first (no Telegram needed)
 python main.py "Who leads the WorldTour?"
@@ -96,12 +110,13 @@ python bot.py
 | Standings | Show me the top 10 WorldTour teams | `pcs_ranking` |
 | Riders | What are Tadej Pogačar's career stats? | `pcs_rider` |
 | Riders | Show me Remco Evenepoel's 2026 results | `pcs_rider_results` |
-| Races | Who won the 2025 Giro d'Italia? | `pcs_race` |
+| Races | Who won the 2026 Giro d'Italia? | `pcs_race` |
 | Races | What were the GC results at Paris-Roubaix? | `search` |
-| Stages | What happened in stage 10 of the Tour de France 2025? | `pcs_stage` |
+| Stages | What happened in stage 10 of the Tour de France 2026? | `pcs_stage` |
 | Startlists | Who is riding the Tour de France 2026? | `pcs_startlist` |
 | News | What is the latest news about Jonas Vingegaard? | `search` |
 | Live | What is happening in the race right now? | `firecrawl` |
+| Live | Who is in the breakaway and what is the gap? | `firecrawl` |
 
 ---
 
@@ -109,18 +124,23 @@ python bot.py
 
 | Command | Description |
 |---|---|
-| `/start` | Welcome message and example questions |
+| `/start` | Welcome message, example questions, and persistent model button |
 | `/help` | Full list of example questions by category |
 | `/status` | Current WorldTour top 5 |
-| Any text | Runs the full agent pipeline |
+| `/model` | Switch AI model with inline buttons |
+| `⚙️ Change Model` | Persistent keyboard button — same as `/model` |
+| Any text | Runs the full agent pipeline with the active model |
 
 ---
 
 ## Known Limitations
 
 - **Firecrawl is for live races only.** It uses your 500 free pages/month. The agent only calls it when a race is actively happening and you ask for live data.
+- **Playwright requires Chromium.** Run `playwright install chromium` once after installing requirements.
 - **Slug precision matters.** The planner converts common names to slugs (e.g. "TDF" → "tour-de-france") but unusual races may not be recognized. Try using the full official race name.
 - **Future races return no results.** If a race hasn't happened yet, the agent will say so clearly rather than guessing.
+- **Groq rate limits.** The free Groq tier has token-per-minute limits. Under heavy use you may occasionally see a rate limit error — wait a few seconds and retry.
+- **Model state is in-memory.** Restarting `bot.py` resets all chats back to Claude Sonnet.
 
 ---
 
@@ -128,9 +148,11 @@ python bot.py
 
 | | |
 |---|---|
-| [Anthropic SDK](https://anthropic.com) | Claude `claude-sonnet-4-6` for planning and synthesis |
+| [Anthropic SDK](https://anthropic.com) | Claude Sonnet 4 and Haiku 4.5 for planning and synthesis |
+| [Groq](https://console.groq.com) | Llama 3.3 70b via OpenAI-compatible SDK |
 | [Tavily](https://tavily.com) | Web search for results, standings, and news |
 | [Firecrawl](https://firecrawl.dev) | Headless browser for live JS-rendered race pages |
+| [Playwright](https://playwright.dev) | Chromium scraping for real-time race situation data |
 | [python-telegram-bot](https://python-telegram-bot.org/) | Async Telegram bot framework |
 | [Pydantic v2](https://docs.pydantic.dev) | Data schemas and validation |
 | [Rich](https://github.com/Textualize/rich) | Terminal UI for CLI mode |
@@ -139,12 +161,11 @@ python bot.py
 
 ## Other Branches
 
-This repo has two more agents on separate branches — same Plan & Execute pattern, different domain.
-
 | Branch | What it is |
 |---|---|
-| [`cycling-agent`](../../tree/cycling-agent) | **Pro Cycling Intelligence Agent** — answers natural language questions about professional cycling via a Telegram bot or CLI. Uses Claude (Anthropic) for planning and synthesis, Tavily for web search, and Firecrawl for live JS-rendered race pages. |
-| [`groq-migration`](../../tree/groq-migration) | Same cycling agent with the LLM swapped from Claude to **Llama 3.3 70b on Groq** via the OpenAI-compatible SDK. Faster and free to run. |
+| [`cycling-agent`](../../tree/cycling-agent) | Cycling agent with Claude (Anthropic) only |
+| [`groq-migration`](../../tree/groq-migration) | Same cycling agent with LLM swapped to Llama 3.3 70b on Groq |
+| [`feature/model-fusion`](../../tree/feature/model-fusion) | **This branch** — unified multi-model with live switcher |
 
 ---
 
