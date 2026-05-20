@@ -1,166 +1,126 @@
-# Lead Research Agent
+# Pro Cycling Intelligence Agent
 
-An AI agent that takes a list of company names, autonomously researches each one across the web, and returns a structured, scored lead profile — ready for your sales team.
+A conversational AI agent that answers natural language questions about professional cycling — standings, race results, rider profiles, stage data, and live race updates — delivered via a Telegram bot or CLI.
 
-Built with the **Plan & Execute** agent pattern using the Anthropic SDK and Tavily.
-
----
-
-## What Problem Does It Solve?
-
-You come back from a conference with 20 business cards. Instead of spending a day Googling each company manually — finding the CEO, checking funding, guessing team size — you run one command and get a scored profile for every company in minutes.
-
-This is the kind of repetitive, research-heavy work that agents are built for.
+Built with the **Plan & Execute** agent pattern using Claude, Tavily, and Firecrawl.
 
 ---
 
-## What is an Agent?
+## What It Does
 
-A regular AI interaction is one turn: you ask, it answers.
+Ask it anything about pro cycling and it will:
+1. **Plan** — Claude decides which tools to use and in what order
+2. **Execute** — fetches data using the right tool for the job (no AI in this step)
+3. **Synthesize** — Claude turns raw findings into a clear, structured answer
 
-An **agent** is different — it receives a goal, breaks it into steps, uses tools to gather information, and synthesizes a result. It decides *how* to get there. You give it a company name; it figures out what to search for, runs the searches, reads the results, and produces a report.
+---
 
-This project uses the **Plan & Execute** pattern, one of the most reliable ways to structure an agent:
+## Architecture
 
 ```
-Company Name
+Question
+    │
+    ▼
+┌──────────┐
+│ PLANNER  │  Claude generates a 2–5 step research plan
+└────┬─────┘
      │
      ▼
-┌─────────────┐
-│   PLANNER   │  Claude decides what to research: 5–8 targeted steps.
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│  EXECUTOR   │  Runs each step using web search or page scraping.
-│             │  No AI here — just a for loop calling tools.
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│ SYNTHESIZER │  Claude reads all findings and outputs a typed, scored LeadProfile.
-└──────┬──────┘
-       │
-       ▼
-  LeadProfile ✓
+┌──────────┐
+│ EXECUTOR │  Runs each step — Tavily search, Firecrawl scrape, or static scrape (no AI)
+└────┬─────┘
+     │
+     ▼
+┌──────────────┐
+│ SYNTHESIZER  │  Claude reads findings and returns a typed CyclingAnswer
+└────┬─────────┘
+     │
+     ▼
+ CyclingAnswer ✓
 ```
-
-Keeping planning and execution separate makes the agent predictable, cheap to run, and easy to debug — you can inspect the plan before anything executes.
 
 ---
 
-## Project Structure
+## Tools
 
-```
-AI_Agent/
-├── main.py                  # Entry point — orchestration and terminal UI
-├── requirements.txt
-│
-├── models/
-│   ├── plan.py              # ResearchPlan schema (planner output)
-│   └── lead.py              # LeadProfile schema (final output)
-│
-├── tools/
-│   ├── web_search.py        # Tavily search wrapper
-│   └── web_scraper.py       # Page scraper (httpx + BeautifulSoup)
-│
-└── agent/
-    ├── planner.py           # Phase 1 — Claude generates the research plan
-    ├── executor.py          # Phase 2 — runs each step with the right tool
-    └── synthesizer.py       # Phase 3 — Claude synthesizes findings into LeadProfile
-```
+The agent picks the right tool automatically based on the question:
+
+| Tool | When it's used | How it works |
+|---|---|---|
+| `pcs_ranking` | WorldTour standings | Tavily web search |
+| `pcs_rider` | Rider profiles and career stats | Tavily web search |
+| `pcs_race` | Race overviews and GC results | Tavily web search |
+| `pcs_stage` | Individual stage results | Tavily web search |
+| `pcs_startlist` | Who is riding a race | Tavily web search |
+| `pcs_rider_results` | Rider's season results | Tavily web search |
+| `search` | News, recent updates, general info | Tavily web search |
+| `scrape` | Static HTML pages | httpx + BeautifulSoup |
+| `firecrawl` | Live race data happening right now | Firecrawl headless browser |
+
+**Firecrawl** is reserved for mid-race live data (live ticker, gaps, km remaining). For everything else — standings, recent results, news — Tavily handles it.
 
 ---
 
 ## Setup
 
-**1. Clone and install**
-
 ```bash
-git clone https://github.com/YOUR_USERNAME/lead-research-agent.git
-cd lead-research-agent
+# 1. Clone and install
 python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
+source venv/bin/activate      # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-```
 
-**2. Add your API keys**
+# 2. Get your API keys
+# - Anthropic: https://console.anthropic.com
+# - Tavily: https://tavily.com
+# - Firecrawl: https://firecrawl.dev (500 pages/month free)
+# - Telegram: message @BotFather → /newbot → copy the token
 
-```bash
+# 3. Configure
 cp .env.example .env
-# Open .env and fill in both keys
+# Fill in all four keys in .env
+
+# 4. Test via CLI first (no Telegram needed)
+python main.py "Who leads the WorldTour?"
+
+# 5. Run the bot
+python bot.py
 ```
 
-| Key | Where to get it |
+---
+
+## Example Questions
+
+| Category | Question | Tool used |
+|---|---|---|
+| Standings | Who is leading the UCI WorldTour? | `pcs_ranking` |
+| Standings | Show me the top 10 WorldTour teams | `pcs_ranking` |
+| Riders | What are Tadej Pogačar's career stats? | `pcs_rider` |
+| Riders | Show me Remco Evenepoel's 2026 results | `pcs_rider_results` |
+| Races | Who won the 2025 Giro d'Italia? | `pcs_race` |
+| Races | What were the GC results at Paris-Roubaix? | `search` |
+| Stages | What happened in stage 10 of the Tour de France 2025? | `pcs_stage` |
+| Startlists | Who is riding the Tour de France 2026? | `pcs_startlist` |
+| News | What is the latest news about Jonas Vingegaard? | `search` |
+| Live | What is happening in the race right now? | `firecrawl` |
+
+---
+
+## Bot Commands
+
+| Command | Description |
 |---|---|
-| `ANTHROPIC_API_KEY` | [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys) — free $5 credit on signup |
-| `TAVILY_API_KEY` | [app.tavily.com](https://app.tavily.com) — free tier: 1,000 searches/month |
-
-**3. Run**
-
-```bash
-# Built-in sample companies
-python main.py
-
-# Your own list
-python main.py "Notion" "Figma" "Linear"
-```
+| `/start` | Welcome message and example questions |
+| `/help` | Full list of example questions by category |
+| `/status` | Current WorldTour top 5 |
+| Any text | Runs the full agent pipeline |
 
 ---
 
-## Example Output
+## Known Limitations
 
-```
-╭──────────────────── Lead Research Agent ────────────────────╮
-│ Researching 3 companies: Notion, Figma, Linear              │
-╰─────────────────────────────────────────────────────────────╯
-
-╭─ Score: 8.5/10 ─────────────────────────────────────────────╮
-│ Notion                                                       │
-│ All-in-one workspace for notes, docs, and project mgmt      │
-│                                                              │
-│ Industry: Productivity SaaS | Size: 500–1000 | Founded: 2016│
-│ Funding: $275M Series C | Hiring: Yes                        │
-╰─────────────────────────────────────────────────────────────╯
-
-Key People:
-  • Ivan Zhao — CEO & Co-founder
-  • Simon Last — CTO & Co-founder
-
-Tech Stack: React, Node.js, PostgreSQL, Electron
-
-Talking Points:
-  → Expanding into enterprise — likely evaluating dev partners
-  → Active backend hiring signals scaling pressure
-  → Ivan Zhao vocal about flexibility — angle for custom tooling
-
-┌──────────────────────────────────────────────────────┐
-│ Company │ Industry          │ Score │ Verdict         │
-│ Notion  │ Productivity SaaS │  8.5  │ ✓ Pursue        │
-│ Figma   │ Design Tools      │  7.2  │ ✓ Pursue        │
-│ Linear  │ Dev Tools         │  5.8  │ ~ Maybe         │
-└──────────────────────────────────────────────────────┘
-```
-
----
-
-## Exploring with the Notebook
-
-A Jupyter notebook (`playground.ipynb`) lets you run each phase individually and inspect the output at every step — the plan Claude generates, the raw web findings, and the final profile.
-
-```bash
-jupyter notebook playground.ipynb
-```
-
----
-
-## Ideas to Extend This
-
-- **CSV input/output** — read companies from a file, write profiles back to one
-- **Cold email generation** — add a fourth phase that drafts a personalized outreach email
-- **Async execution** — run all research steps in parallel with `asyncio`
-- **Custom scoring** — pass your own ICP criteria to the synthesizer system prompt
-- **Caching** — persist raw findings so you don't re-research the same company twice
+- **Firecrawl is for live races only.** It uses your 500 free pages/month. The agent only calls it when a race is actively happening and you ask for live data.
+- **Slug precision matters.** The planner converts common names to slugs (e.g. "TDF" → "tour-de-france") but unusual races may not be recognized. Try using the full official race name.
+- **Future races return no results.** If a race hasn't happened yet, the agent will say so clearly rather than guessing.
 
 ---
 
@@ -169,10 +129,11 @@ jupyter notebook playground.ipynb
 | | |
 |---|---|
 | [Anthropic SDK](https://anthropic.com) | Claude `claude-sonnet-4-6` for planning and synthesis |
-| [Tavily](https://tavily.com) | Web search built for AI agents |
+| [Tavily](https://tavily.com) | Web search for results, standings, and news |
+| [Firecrawl](https://firecrawl.dev) | Headless browser for live JS-rendered race pages |
+| [python-telegram-bot](https://python-telegram-bot.org/) | Async Telegram bot framework |
 | [Pydantic v2](https://docs.pydantic.dev) | Data schemas and validation |
-| [httpx](https://www.python-httpx.org) + [BeautifulSoup4](https://www.crummy.com/software/BeautifulSoup/) | Page scraping |
-| [Rich](https://github.com/Textualize/rich) | Terminal UI |
+| [Rich](https://github.com/Textualize/rich) | Terminal UI for CLI mode |
 
 ---
 
