@@ -24,12 +24,16 @@ Available tools:
 - scrape: Scrape a static HTML page (query: full URL)
 - firecrawl: Scrape JS-rendered pages — use for live race data happening RIGHT NOW mid-race.
   Query formats:
-    "live/race-slug/year"         → race-level live ticker
+    "situation/race-slug/year/N"  → LIVE groups, time gaps, riders right now (Playwright — most accurate)
+    "live/race-slug/year"         → full race-level live ticker page
     "stage-live/race-slug/year/N" → live ticker for a specific stage (e.g. "stage-live/giro-d-italia/2026/10")
     "gc/race-slug/year"           → current GC standings
     "stage/race-slug/year/N"      → completed stage results page
     "ranking"                     → current WorldTour ranking
     "https://..."                 → any direct URL
+
+  Use "situation/..." when the user asks about the current race situation, live groups, time gaps,
+  who is in the breakaway, what km are left, or anything happening right now mid-stage.
 
 Rules:
 - Generate 2 to 5 targeted steps — no more

@@ -105,6 +105,14 @@ def execute_plan(plan: ResearchPlan) -> dict[str, str]:
                     stage_num = int(parts[3]) if len(parts) > 3 else 1
                     findings[step.description] = scrape_pcs_stage(race_slug, year, stage_num)
 
+                elif query.startswith("situation/"):
+                    parts = query.split("/")
+                    race_slug = parts[1]
+                    year = int(parts[2]) if len(parts) > 2 else 2026
+                    stage_num = int(parts[3]) if len(parts) > 3 else 1
+                    from tools.live_scraper import get_race_situation
+                    findings[step.description] = get_race_situation(race_slug, year, stage_num)
+
                 elif query.startswith("https://"):
                     findings[step.description] = scrape_live_page(query)
 
