@@ -10,7 +10,7 @@ from rich.console import Console
 sys.path.insert(0, os.path.dirname(__file__))
 load_dotenv()
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.constants import ChatAction, ParseMode
 
@@ -58,12 +58,19 @@ def _format_answer(answer: CyclingAnswer) -> str:
     return "\n".join(parts)
 
 
+_REPLY_KEYBOARD = ReplyKeyboardMarkup(
+    [[KeyboardButton("⚙️ Change Model")]],
+    resize_keyboard=True,
+    is_persistent=True,
+)
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "🚴 <b>Pro Cycling Intelligence Agent</b>\n\n"
         "Ask me anything about professional cycling — standings, race results, "
         "rider profiles, stage data, and more.\n\n"
-        "⚙️ Use /model to switch between Claude Sonnet, Claude Haiku, and Groq Llama 3.3\n\n"
+        "⚙️ Use the button below to switch between Claude Sonnet, Claude Haiku, and Groq Llama 3.3\n\n"
         "<b>Try asking:</b>\n"
         "• Who is leading the WorldTour right now?\n"
         "• What are Tadej Pogačar's results in 2026?\n"
@@ -71,7 +78,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• Show me the startlist for the Tour de France 2026\n\n"
         "Just type your question and I'll research it for you."
     )
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=_REPLY_KEYBOARD)
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -173,6 +180,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     question = update.message.text.strip()
     chat_id = update.effective_chat.id
     if not question:
+        return
+
+    if question == "⚙️ Change Model":
+        await cmd_model(update, context)
         return
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
