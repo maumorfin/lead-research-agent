@@ -10,8 +10,8 @@ from rich.console import Console
 sys.path.insert(0, os.path.dirname(__file__))
 load_dotenv()
 
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.constants import ChatAction, ParseMode
 
 from agent.planner import create_plan
@@ -19,6 +19,7 @@ from agent.executor import execute_plan
 from agent.synthesizer import synthesize
 from models.answer import CyclingAnswer
 from tools.cycling_pcs import get_individual_ranking
+from config import AVAILABLE_MODELS, set_model, get_model, get_model_key
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -30,10 +31,10 @@ console = Console()
 _thread_pool = ThreadPoolExecutor(max_workers=4)
 
 
-def _run_pipeline(question: str) -> CyclingAnswer:
-    plan = create_plan(question)
+def _run_pipeline(question: str, chat_id: int) -> CyclingAnswer:
+    plan = create_plan(question, chat_id=chat_id)
     findings = execute_plan(plan)
-    return synthesize(question, findings)
+    return synthesize(question, findings, chat_id=chat_id)
 
 
 def _format_answer(answer: CyclingAnswer) -> str:
@@ -62,11 +63,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🚴 <b>Pro Cycling Intelligence Agent</b>\n\n"
         "Ask me anything about professional cycling — standings, race results, "
         "rider profiles, stage data, and more.\n\n"
+        "⚙️ Use /model to switch between Claude Sonnet, Claude Haiku, and Groq Llama 3.3\n\n"
         "<b>Try asking:</b>\n"
         "• Who is leading the WorldTour right now?\n"
-        "• What are Tadej Pogačar's results in 2025?\n"
-        "• Who won stage 10 of the Giro d'Italia 2025?\n"
-        "• Show me the startlist for the Tour de France 2025\n\n"
+        "• What are Tadej Pogačar's results in 2026?\n"
+        "• Who won stage 10 of the Giro d'Italia 2026?\n"
+        "• Show me the startlist for the Tour de France 2026\n\n"
         "Just type your question and I'll research it for you."
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -80,17 +82,20 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• Show me the top 10 WorldTour teams\n\n"
         "<b>Riders</b>\n"
         "• What are Remco Evenepoel's stats?\n"
-        "• Show me Jonas Vingegaard's 2025 results\n\n"
+        "• Show me Jonas Vingegaard's 2026 results\n\n"
         "<b>Races</b>\n"
-        "• Who won the 2025 Giro d'Italia?\n"
-        "• What were the GC results at Paris-Roubaix 2025?\n\n"
+        "• Who won the 2026 Giro d'Italia?\n"
+        "• What were the GC results at Paris-Roubaix 2026?\n\n"
         "<b>Stages</b>\n"
-        "• What happened in stage 3 of the Tour de France 2025?\n"
-        "• Who won stage 1 of the Vuelta 2025?\n\n"
+        "• What happened in stage 3 of the Tour de France 2026?\n"
+        "• Who won stage 1 of the Vuelta 2026?\n\n"
         "<b>Startlists</b>\n"
-        "• Who is riding the Tour de France 2025?\n"
-        "• Show me the startlist for the Vuelta a España 2025\n\n"
-        "Use /status for the current WorldTour top 5."
+        "• Who is riding the Tour de France 2026?\n\n"
+        "<b>Live</b>\n"
+        "• What is happening in the race right now?\n"
+        "• Show me the current situation in stage 10\n\n"
+        "Use /status for the current WorldTour top 5.\n"
+        "Use /model to switch AI models."
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -126,28 +131,75 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
 
 
+async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    current_key = get_model_key(chat_id)
+
+    keyboard = [
+        [InlineKeyboardButton(
+            f"{'✅ ' if current_key == key else ''}{model.display_name}",
+            callback_data=f"model_{key}",
+        )]
+        for key, model in AVAILABLE_MODELS.items()
+    ]
+
+    current = get_model(chat_id)
+    await update.message.reply_text(
+        f"Current model: <b>{html.escape(current.display_name)}</b>\n\nChoose a model:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def handle_model_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    key = query.data.replace("model_", "")
+    chat_id = query.message.chat_id
+
+    try:
+        model = set_model(chat_id, key)
+        await query.edit_message_text(
+            f"✅ Switched to <b>{html.escape(model.display_name)}</b>\n\n"
+            "All future questions in this chat will use this model.",
+            parse_mode=ParseMode.HTML,
+        )
+    except ValueError:
+        await query.edit_message_text("❌ Unknown model. Please try again.")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     question = update.message.text.strip()
+    chat_id = update.effective_chat.id
     if not question:
         return
 
-    await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id, action=ChatAction.TYPING
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+
+    current_model = get_model(chat_id)
+    await update.message.reply_text(
+        f"🔍 Researching with <b>{html.escape(current_model.display_name)}</b>...",
+        parse_mode=ParseMode.HTML,
     )
-    await update.message.reply_text("🔍 Researching...")
 
     try:
         loop = asyncio.get_event_loop()
-        answer = await loop.run_in_executor(_thread_pool, _run_pipeline, question)
+        answer = await loop.run_in_executor(
+            _thread_pool,
+            lambda: _run_pipeline(question, chat_id),
+        )
         text = _format_answer(answer)
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     except Exception as e:
-        logger.error(f"Agent pipeline failed for question '{question}': {e}")
+        logger.error(f"Pipeline failed for '{question}': {e}")
         console.print_exception()
         await update.message.reply_text(
             "Sorry, I couldn't find data for that question. "
-            "Try rephrasing or ask about a specific race or rider."
+            "Try rephrasing or ask about a specific race or rider.\n\n"
+            f"<i>Model used: {html.escape(current_model.display_name)}</i>",
+            parse_mode=ParseMode.HTML,
         )
 
 
@@ -161,6 +213,8 @@ def main() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("model", cmd_model))
+    app.add_handler(CallbackQueryHandler(handle_model_callback, pattern="^model_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     console.print("[green]Bot is running. Press Ctrl+C to stop.[/green]")

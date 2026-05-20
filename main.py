@@ -26,7 +26,7 @@ def run_agent(question: str):
     )
 
     console.print("\n[cyan]Planning research...[/cyan]")
-    plan = create_plan(question)
+    plan = create_plan(question, chat_id=0)
     console.print(f"[cyan]{len(plan.steps)} steps planned:[/cyan]")
     for step in plan.steps:
         console.print(f"  [{step.tool.value}] {step.description}")
@@ -35,7 +35,7 @@ def run_agent(question: str):
     findings = execute_plan(plan)
 
     console.print("[green]Synthesizing answer...[/green]\n")
-    answer = synthesize(question, findings)
+    answer = synthesize(question, findings, chat_id=0)
 
     color = "green" if answer.confidence == "high" else "yellow" if answer.confidence == "medium" else "red"
     console.print(

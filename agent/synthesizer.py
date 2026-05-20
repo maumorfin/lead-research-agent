@@ -1,7 +1,6 @@
-from anthropic import Anthropic
+from config import get_model
+from agent.llm_client import call_llm
 from models.answer import CyclingAnswer
-
-client = Anthropic()
 
 SYSTEM_PROMPT = """You are a knowledgeable professional cycling commentator and analyst.
 You have been given raw data fetched from procyclingstats.com and web searches.
@@ -14,36 +13,56 @@ Guidelines:
 - Suggest 2-3 relevant follow-up questions the user would genuinely find interesting
 - Keep the main answer concise but complete (3-6 sentences for simple questions)
 - Set confidence to "low" if data seems outdated, incomplete, or contradictory
-- Set confidence to "high" only when you have complete, structured PCS data
-- Always fill source_note with where the data came from (e.g. "procyclingstats.com" or "web search")"""
+- Set confidence to "high" only when you have complete, structured data
+- Always fill source_note with where the data came from"""
+
+# Flat schema — no $defs/$ref so it works with both Anthropic and Groq
+_ANSWER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "question": {"type": "string", "description": "The original user question"},
+        "answer": {"type": "string", "description": "Main answer in clear prose, 3-6 sentences"},
+        "data_points": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Key facts as short bullet points",
+        },
+        "source_note": {"type": "string", "description": "Where the data came from"},
+        "follow_up_suggestions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "2-3 related questions the user might ask next",
+        },
+        "confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"],
+            "description": "high=complete fresh data, medium=partial, low=outdated or missing",
+        },
+    },
+    "required": ["question", "answer", "data_points", "follow_up_suggestions", "confidence"],
+}
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "submit_cycling_answer",
+            "description": "Submit the final structured cycling answer",
+            "parameters": _ANSWER_SCHEMA,
+        },
+    }
+]
 
 
-def synthesize(question: str, raw_findings: dict[str, str]) -> CyclingAnswer:
+def synthesize(question: str, raw_findings: dict[str, str], chat_id: int = 0) -> CyclingAnswer:
     findings_text = "\n\n---\n\n".join(
         f"**{topic}**\n{content}" for topic, content in raw_findings.items()
     )
-
-    tools = [
-        {
-            "name": "submit_cycling_answer",
-            "description": "Submit the final structured cycling answer",
-            "input_schema": CyclingAnswer.model_json_schema(),
-        }
-    ]
-
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
+    result = call_llm(
+        model_config=get_model(chat_id),
+        system_prompt=SYSTEM_PROMPT,
+        user_message=f"Question: {question}\n\nResearch findings:\n\n{findings_text}",
+        tools=TOOLS,
         max_tokens=3000,
-        system=SYSTEM_PROMPT,
-        tools=tools,
-        tool_choice={"type": "any"},
-        messages=[
-            {
-                "role": "user",
-                "content": f"Question: {question}\n\nResearch findings:\n\n{findings_text}",
-            }
-        ],
     )
-
-    tool_block = next(b for b in response.content if b.type == "tool_use")
-    return CyclingAnswer(**tool_block.input)
+    return CyclingAnswer(**result["input"])
