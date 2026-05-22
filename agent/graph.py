@@ -19,15 +19,43 @@ def _append_messages(left: list, right: list) -> list:
 
 
 class AgentState(TypedDict):
-    question: str
-    chat_id:  int
-    plan:     ResearchPlan | None
-    findings: dict
-    answer:   CyclingAnswer | None
-    messages: Annotated[list, _append_messages]
+    question:          str
+    resolved_question: str
+    chat_id:           int
+    plan:              ResearchPlan | None
+    findings:          dict
+    answer:            CyclingAnswer | None
+    messages:          Annotated[list, _append_messages]
 
 
 # --- Prompts ---
+
+RESOLVER_PROMPT = """You are a conversation context resolver for a cycling assistant.
+
+Your job: rewrite the user's latest question into a fully self-contained question
+that can be understood without any prior context.
+
+Rules:
+- Replace ALL pronouns (he, she, they, it, his, her) with the actual name
+- Replace vague references ("that race", "yesterday's stage", "the same team")
+  with the actual entity from conversation history
+- If the question is already self-contained, return it unchanged
+- Never answer the question — only rewrite it
+- Keep it concise and natural
+
+Examples:
+  History: [Q: "Who is leading the Giro?", A: "Pogačar leads by 45 seconds"]
+  Question: "What did he win this year?"
+  Rewritten: "What races did Tadej Pogačar win in 2026?"
+
+  History: [Q: "Tell me about the Tour de France 2026"]
+  Question: "Who won it?"
+  Rewritten: "Who won the Tour de France 2026?"
+
+  History: []
+  Question: "Who leads the WorldTour?"
+  Rewritten: "Who leads the WorldTour?"  (already self-contained)
+"""
 
 PLANNER_PROMPT_BASE = f"""You are a professional cycling data analyst assistant.
 Given a user's question about professional cycling, create a focused research plan
@@ -57,17 +85,26 @@ Common race slugs:
 {json.dumps(COMMON_RACE_SLUGS, indent=2)}
 """
 
-SYNTHESIZER_PROMPT = """You are a knowledgeable professional cycling commentator and analyst.
-Synthesize the raw research findings into a clear, accurate, engaging answer.
+SYNTHESIZER_PROMPT = """You are a passionate cycling fan and expert analyst —
+like a knowledgeable friend who loves the sport and remembers what you've been talking about.
 
-Guidelines:
-- Be precise with numbers, dates, and rider names
-- Use proper cycling terminology naturally (GC, peloton, domestique, jersey, etc.)
-- Never invent facts — if data is missing say so clearly
-- Suggest 2-3 relevant follow-up questions
+Tone:
+- Conversational, warm, natural — not a formal report
+- Reference the conversation naturally when relevant
+  e.g. "Yeah, so after what we said about Pogačar earlier — he also won..."
+  e.g. "Good follow-up — that's actually connected to the Giro situation..."
+- Short sentences where possible. No bullet-point-heavy answers unless the
+  user explicitly asked for a list
+- If the user asked a short question, give a short answer first, then expand
+
+Content:
+- Be precise with numbers, dates, names
+- Never invent facts — if data is missing say so directly
+- Suggest 1-2 natural follow-up questions as if continuing a conversation
+  e.g. "Want me to check how he did in the mountain stages specifically?"
 - Match the user's language if known from their profile
-- Set confidence to "high" only when data is complete and structured
-- Always fill source_note"""
+- Set confidence honestly
+- Always note where the data came from"""
 
 SUMMARIZATION_PROMPT = """Summarize this cycling conversation into 3-5 sentences.
 Keep: key facts established, riders and races discussed, questions asked and answered.
@@ -75,6 +112,22 @@ Discard: filler, repeated information, tool outputs.
 Write it as context for the next conversation, not as a transcript."""
 
 # Flat schemas for cross-provider compatibility
+_RESOLVER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "resolved_question": {
+            "type": "string",
+            "description": "The fully self-contained rewritten question",
+        },
+        "entities_referenced": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Riders/races/teams that were resolved e.g. tadej-pogacar, giro-d-italia",
+        },
+    },
+    "required": ["resolved_question", "entities_referenced"],
+}
+
 _PLAN_SCHEMA = {
     "type": "object",
     "properties": {
@@ -108,11 +161,17 @@ _ANSWER_SCHEMA = {
         "answer":               {"type": "string", "description": "Main answer in clear prose, 3-6 sentences"},
         "data_points":          {"type": "array", "items": {"type": "string"}, "description": "Key facts as bullet points"},
         "source_note":          {"type": "string", "description": "Where the data came from"},
-        "follow_up_suggestions": {"type": "array", "items": {"type": "string"}, "description": "2-3 follow-up questions"},
+        "follow_up_suggestions": {"type": "array", "items": {"type": "string"}, "description": "1-2 natural follow-up questions"},
         "confidence":           {"type": "string", "enum": ["high", "medium", "low"]},
     },
     "required": ["question", "answer", "data_points", "follow_up_suggestions", "confidence"],
 }
+
+RESOLVER_TOOLS = [{"type": "function", "function": {
+    "name": "submit_resolved_question",
+    "description": "Submit the rewritten self-contained question",
+    "parameters": _RESOLVER_SCHEMA,
+}}]
 
 PLANNER_TOOLS = [{"type": "function", "function": {
     "name": "submit_research_plan",
@@ -173,16 +232,47 @@ def summarization_node(state: AgentState, *, user_store: UserStore) -> dict:
     return {"messages": compressed}
 
 
+def resolver_node(state: AgentState) -> dict:
+    messages = state.get("messages", [])
+
+    if len(messages) < 2:
+        return {"resolved_question": state["question"]}
+
+    recent = messages[-6:]
+    history_text = "\n".join(
+        f"{m['role'].upper()}: {m['content']}"
+        for m in recent
+        if isinstance(m, dict) and m.get("content")
+    )
+
+    try:
+        result = call_llm(
+            model_config=get_model(state["chat_id"]),
+            system_prompt=RESOLVER_PROMPT,
+            user_message=(
+                f"Conversation history:\n{history_text}\n\n"
+                f"Latest question to resolve: {state['question']}"
+            ),
+            tools=RESOLVER_TOOLS,
+            max_tokens=300,
+        )
+        return {"resolved_question": result["input"]["resolved_question"]}
+    except Exception:
+        return {"resolved_question": state["question"]}
+
+
 def planner_node(state: AgentState, *, user_store: UserStore) -> dict:
     user_context = user_store.format_for_prompt(state["chat_id"])
     system_prompt = PLANNER_PROMPT_BASE
     if user_context:
         system_prompt += f"\n\n{user_context}"
 
+    question_to_plan = state.get("resolved_question") or state["question"]
+
     result = call_llm(
         model_config=get_model(state["chat_id"]),
         system_prompt=system_prompt,
-        user_message=state["question"],
+        user_message=question_to_plan,
         tools=PLANNER_TOOLS,
         max_tokens=2000,
     )
@@ -200,17 +290,38 @@ def synthesizer_node(state: AgentState, *, user_store: UserStore) -> dict:
         for topic, content in state["findings"].items()
     )
 
+    messages = state.get("messages", [])
+    recent   = messages[-4:] if len(messages) >= 4 else messages
+
+    history_context = ""
+    if recent:
+        history_context = "\n\nRecent conversation:\n" + "\n".join(
+            f"{m['role'].upper()}: {m['content']}"
+            for m in recent
+            if isinstance(m, dict) and m.get("content")
+        )
+
+    original  = state["question"]
+    resolved  = state.get("resolved_question", original)
+    q_context = f"Original question: {original}"
+    if resolved != original:
+        q_context += f"\nResolved to: {resolved}"
+
     result = call_llm(
         model_config=get_model(state["chat_id"]),
         system_prompt=SYNTHESIZER_PROMPT,
-        user_message=f"Question: {state['question']}\n\nFindings:\n\n{findings_text}",
+        user_message=(
+            f"{q_context}"
+            f"{history_context}\n\n"
+            f"Research findings:\n\n{findings_text}"
+        ),
         tools=SYNTHESIZER_TOOLS,
         max_tokens=3000,
     )
     answer = CyclingAnswer(**result["input"])
 
     new_messages = [
-        {"role": "user",      "content": state["question"]},
+        {"role": "user",      "content": original},
         {"role": "assistant", "content": answer.answer},
     ]
     return {"answer": answer, "messages": new_messages}
@@ -219,33 +330,27 @@ def synthesizer_node(state: AgentState, *, user_store: UserStore) -> dict:
 # --- Graph builder ---
 
 def build_graph(db_path: str = "data/checkpoints.db"):
-    """
-    Builds and compiles the LangGraph StateGraph.
-    Returns (app, user_store).
-    """
     import os
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     user_store   = UserStore()
     conn         = sqlite3.connect(db_path, check_same_thread=False)
     checkpointer = SqliteSaver(conn).with_allowlist(["models.plan", "models.answer"])
 
-    def _summarization(state):
-        return summarization_node(state, user_store=user_store)
-
-    def _planner(state):
-        return planner_node(state, user_store=user_store)
-
-    def _synthesizer(state):
-        return synthesizer_node(state, user_store=user_store)
+    def _summarization(state): return summarization_node(state, user_store=user_store)
+    def _resolver(state):      return resolver_node(state)
+    def _planner(state):       return planner_node(state, user_store=user_store)
+    def _synthesizer(state):   return synthesizer_node(state, user_store=user_store)
 
     graph = StateGraph(AgentState)
     graph.add_node("summarizer",  _summarization)
+    graph.add_node("resolver",    _resolver)
     graph.add_node("planner",     _planner)
     graph.add_node("executor",    executor_node)
     graph.add_node("synthesizer", _synthesizer)
 
     graph.set_entry_point("summarizer")
-    graph.add_edge("summarizer",  "planner")
+    graph.add_edge("summarizer",  "resolver")
+    graph.add_edge("resolver",    "planner")
     graph.add_edge("planner",     "executor")
     graph.add_edge("executor",    "synthesizer")
     graph.add_edge("synthesizer", END)
