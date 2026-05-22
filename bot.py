@@ -14,12 +14,12 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Keyboar
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.constants import ChatAction, ParseMode
 
-from agent.planner import create_plan
-from agent.executor import execute_plan
-from agent.synthesizer import synthesize
 from models.answer import CyclingAnswer
 from tools.cycling_pcs import get_individual_ranking
 from config import AVAILABLE_MODELS, set_model, get_model, get_model_key
+from agent.graph import build_graph
+from memory.session_manager import SessionManager
+from memory.handoff import run_handoff
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -29,12 +29,23 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 _thread_pool = ThreadPoolExecutor(max_workers=4)
+app, user_store = build_graph()
+session_mgr = SessionManager()
 
 
-def _run_pipeline(question: str, chat_id: int) -> CyclingAnswer:
-    plan = create_plan(question, chat_id=chat_id)
-    findings = execute_plan(plan)
-    return synthesize(question, findings, chat_id=chat_id)
+def _run_pipeline(question: str, chat_id: int, thread_id: str) -> CyclingAnswer:
+    result = app.invoke(
+        {
+            "question": question,
+            "chat_id":  chat_id,
+            "messages": [],
+            "findings": {},
+            "plan":     None,
+            "answer":   None,
+        },
+        config={"configurable": {"thread_id": thread_id}},
+    )
+    return result["answer"]
 
 
 def _format_answer(answer: CyclingAnswer) -> str:
@@ -188,6 +199,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
+    session = session_mgr.get_or_create(chat_id)
+
+    if session.is_new and session.old_thread_id:
+        await asyncio.get_event_loop().run_in_executor(
+            _thread_pool,
+            lambda: run_handoff(session.old_thread_id, chat_id, app, user_store),
+        )
+
     current_model = get_model(chat_id)
     await update.message.reply_text(
         f"🔍 Researching with <b>{html.escape(current_model.display_name)}</b>...",
@@ -198,7 +217,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         loop = asyncio.get_event_loop()
         answer = await loop.run_in_executor(
             _thread_pool,
-            lambda: _run_pipeline(question, chat_id),
+            lambda: _run_pipeline(question, chat_id, session.thread_id),
         )
         text = _format_answer(answer)
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -207,9 +226,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.error(f"Pipeline failed for '{question}': {e}")
         console.print_exception()
         await update.message.reply_text(
-            "Sorry, I couldn't find data for that question. "
-            "Try rephrasing or ask about a specific race or rider.\n\n"
-            f"<i>Model used: {html.escape(current_model.display_name)}</i>",
+            "Sorry, something went wrong. Please try again.\n\n"
+            f"<i>Model: {html.escape(current_model.display_name)}</i>",
             parse_mode=ParseMode.HTML,
         )
 
