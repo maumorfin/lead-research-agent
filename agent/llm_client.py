@@ -52,25 +52,40 @@ def _call_anthropic(model_id, system_prompt, user_message, tools, max_tokens):
 
 
 def _call_groq(model_id, system_prompt, user_message, tools, max_tokens):
-    from openai import OpenAI
+    import re
+    from openai import OpenAI, BadRequestError
 
     client = OpenAI(
         api_key=os.environ["GROQ_API_KEY"],
         base_url="https://api.groq.com/openai/v1",
     )
 
-    response = client.chat.completions.create(
-        model=model_id,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
-        tools=tools,
-        tool_choice="required",
-    )
+    try:
+        response = client.chat.completions.create(
+            model=model_id,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            tools=tools,
+            tool_choice="required",
+        )
 
-    tool_call = response.choices[0].message.tool_calls[0]
-    return {
-        "name": tool_call.function.name,
-        "input": json.loads(tool_call.function.arguments),
-    }
+        tool_call = response.choices[0].message.tool_calls[0]
+        return {
+            "name": tool_call.function.name,
+            "input": json.loads(tool_call.function.arguments),
+        }
+
+    except BadRequestError as e:
+        # Groq/Llama occasionally emits <function=name>{...}</function> instead of
+        # a proper tool call. The JSON inside is valid — parse it and recover.
+        body = e.body or {}
+        failed = body.get("error", {}).get("failed_generation", "")
+        match = re.search(r"<function=(\w+)>(.*?)</function>", failed, re.DOTALL)
+        if match:
+            return {
+                "name": match.group(1),
+                "input": json.loads(match.group(2)),
+            }
+        raise
