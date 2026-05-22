@@ -78,14 +78,22 @@ def _call_groq(model_id, system_prompt, user_message, tools, max_tokens):
         }
 
     except BadRequestError as e:
-        # Groq/Llama occasionally emits <function=name>{...}</function> instead of
-        # a proper tool call. The JSON inside is valid — parse it and recover.
-        body = e.body or {}
+        # Groq/Llama occasionally emits tool calls in non-standard formats.
+        # The JSON inside is always valid — extract it and recover silently.
+        body   = e.body or {}
         failed = body.get("error", {}).get("failed_generation", "")
-        match = re.search(r"<function=(\w+)>(.*?)</function>", failed, re.DOTALL)
-        if match:
-            return {
-                "name": match.group(1),
-                "input": json.loads(match.group(2)),
-            }
+
+        # Variant 1: <function=name>{...}</function>
+        m = re.search(r"<function=(\w+)>(.*?)</function>", failed, re.DOTALL)
+        if m:
+            return {"name": m.group(1), "input": json.loads(m.group(2))}
+
+        # Variant 2: <function=name [{...}]  (array-wrapped, no closing tag)
+        m = re.search(r"<function=(\w+)\s+(\[.+\]|\{.+\})", failed, re.DOTALL)
+        if m:
+            data = json.loads(m.group(2))
+            if isinstance(data, list) and data:
+                data = data[0]
+            return {"name": m.group(1), "input": data}
+
         raise
