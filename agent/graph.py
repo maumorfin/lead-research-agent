@@ -284,6 +284,33 @@ def executor_node(state: AgentState) -> dict:
     return {"findings": findings}
 
 
+def _repair_answer(data: dict) -> dict:
+    """Coerce Groq's occasionally malformed answer fields into the expected types.
+
+    Groq sometimes fills array fields with CDATA-wrapped strings or omits
+    required fields entirely. This repairs the dict before Pydantic sees it.
+    """
+    import re
+
+    def to_list(val):
+        if isinstance(val, list):
+            return val
+        if not isinstance(val, str):
+            return []
+        val = re.sub(r"<!\[CDATA\[|\]\]>", "", val)
+        lines = [re.sub(r"^[-•*\d.]+\s*", "", ln).strip() for ln in val.splitlines()]
+        return [ln for ln in lines if ln]
+
+    out = dict(data)
+    for field in ("data_points", "follow_up_suggestions"):
+        if not isinstance(out.get(field), list):
+            out[field] = to_list(out.get(field, []))
+    if "confidence" not in out or out["confidence"] not in ("high", "medium", "low"):
+        out["confidence"] = "medium"
+    out.setdefault("source_note", None)
+    return out
+
+
 def synthesizer_node(state: AgentState, *, user_store: UserStore) -> dict:
     findings_text = "\n\n---\n\n".join(
         f"**{topic}**\n{content}"
@@ -318,7 +345,10 @@ def synthesizer_node(state: AgentState, *, user_store: UserStore) -> dict:
         tools=SYNTHESIZER_TOOLS,
         max_tokens=3000,
     )
-    answer = CyclingAnswer(**result["input"])
+    try:
+        answer = CyclingAnswer(**result["input"])
+    except Exception:
+        answer = CyclingAnswer(**_repair_answer(result["input"]))
 
     new_messages = [
         {"role": "user",      "content": original},
