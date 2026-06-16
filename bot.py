@@ -28,6 +28,9 @@ from memory.user_store import UserStore
 from models.answer import CyclingAnswer
 from config import AVAILABLE_MODELS, get_model, get_model_key, set_model
 from tools.cycling_pcs import get_individual_ranking
+from watcher.poller import RaceWatch, PollResult, run_watcher
+from watcher.dispatcher import dispatch
+from watcher.subscription_store import SubscriptionStore
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -36,10 +39,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 console = Console()
 
+bot_app = None  # set in main(), used by _send_message
+
 # ── Shared instances ──────────────────────────────────────────────────────────
 _thread_pool = ThreadPoolExecutor(max_workers=4)
 app_graph, user_store = build_graph()
 session_mgr  = SessionManager()
+sub_store    = SubscriptionStore()
 
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
@@ -67,6 +73,64 @@ def _do_handoff(old_thread_id: str, chat_id: int):
         logger.info(f"Handoff complete for chat {chat_id}, thread {old_thread_id}")
     except Exception as e:
         logger.warning(f"Handoff failed for chat {chat_id}: {e}")
+
+
+async def _send_message(chat_id: int, text: str) -> None:
+    """Send a proactive Telegram message to a user."""
+    try:
+        await bot_app.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as e:
+        logger.error(f"[send_message] Failed to send to {chat_id}: {e}")
+
+
+async def _watcher_loop() -> None:
+    """
+    Background watcher loop.
+    Polls all subscribed races and dispatches notifications.
+    Runs as an asyncio task alongside the bot.
+    """
+    logger.info("[watcher] Background watcher started")
+
+    while True:
+        try:
+            subscriptions = sub_store.build_subscriptions_dict()
+
+            if not subscriptions:
+                logger.debug("[watcher] No active subscriptions — sleeping")
+                await asyncio.sleep(60)
+                continue
+
+            watched_races = [
+                RaceWatch(race_slug=slug, year=year, stage=stage)
+                for slug, year, stage in sub_store.get_all_watched_races()
+            ]
+
+            from watcher.poller import poll_once
+            for race in watched_races:
+                try:
+                    result = await poll_once(race)
+                    if result.error:
+                        logger.warning(f"[watcher] Poll error: {result.error}")
+                    elif result.changed:
+                        sent = await dispatch(
+                            result=result,
+                            subscriptions=subscriptions,
+                            user_store=user_store,
+                            send_message_fn=_send_message,
+                        )
+                        logger.info(f"[watcher] Sent {sent} notification(s)")
+                except Exception as e:
+                    logger.error(f"[watcher] Error polling {race.race_slug}: {e}")
+
+            await asyncio.sleep(60)
+
+        except Exception as e:
+            logger.error(f"[watcher] Unexpected error in watcher loop: {e}")
+            await asyncio.sleep(60)
 
 
 # ── Formatters ────────────────────────────────────────────────────────────────
@@ -279,27 +343,35 @@ async def handle_message(
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
+    global bot_app
+
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         console.print("[red]TELEGRAM_BOT_TOKEN not set in .env[/red]")
         sys.exit(1)
 
-    application = Application.builder().token(token).build()
+    bot_app = Application.builder().token(token).build()
 
-    application.add_handler(CommandHandler("start",   cmd_start))
-    application.add_handler(CommandHandler("help",    cmd_help))
-    application.add_handler(CommandHandler("status",  cmd_status))
-    application.add_handler(CommandHandler("model",   cmd_model))
-    application.add_handler(CommandHandler("watch",   cmd_watch))
-    application.add_handler(
+    bot_app.add_handler(CommandHandler("start",   cmd_start))
+    bot_app.add_handler(CommandHandler("help",    cmd_help))
+    bot_app.add_handler(CommandHandler("status",  cmd_status))
+    bot_app.add_handler(CommandHandler("model",   cmd_model))
+    bot_app.add_handler(CommandHandler("watch",   cmd_watch))
+    bot_app.add_handler(
         CallbackQueryHandler(handle_model_callback, pattern="^model_")
     )
-    application.add_handler(
+    bot_app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
 
-    console.print("[green]Bot is running. Press Ctrl+C to stop.[/green]")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    async def post_init(_application):
+        asyncio.create_task(_watcher_loop())
+        logger.info("[bot] Background watcher task started")
+
+    bot_app.post_init = post_init
+
+    console.print("[green]Bot is running with live race watcher. Press Ctrl+C to stop.[/green]")
+    bot_app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
