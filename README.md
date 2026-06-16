@@ -182,8 +182,10 @@ This repo has two more agents on separate branches — same Plan & Execute patte
 
 | Branch | What it is |
 |---|---|
-| [`cycling-agent`](../../tree/cycling-agent) | **Pro Cycling Intelligence Agent** — answers natural language questions about professional cycling via a Telegram bot or CLI. Uses Claude (Anthropic) for planning and synthesis, Tavily for web search, and Firecrawl for live JS-rendered race pages. |
+| [`cycling-agent`](../../tree/cycling-agent) | **Pro Cycling Intelligence Agent** — answers natural language questions about professional cycling via a Telegram bot or CLI. Uses Claude for planning and synthesis, Tavily for web search, and Firecrawl for live JS-rendered race pages. |
 | [`groq-migration`](../../tree/groq-migration) | Same cycling agent with the LLM swapped from Claude to **Llama 3.3 70b on Groq** via the OpenAI-compatible SDK. Faster and free to run. |
+| [`feature/model-fusion`](../../tree/feature/model-fusion) | Cycling agent with **multi-model support** — Claude Sonnet, Claude Haiku, and Groq switchable live inside Telegram with a `/model` command and persistent keyboard button. |
+| [`feature/langgraph-memory`](../../tree/feature/langgraph-memory) | **LangGraph refactor** — persistent in-thread memory (SqliteSaver), pronoun resolution ("he" → rider name), conversational synthesizer tone, 2-hour session management, and long-term user profiles in SQLite. |
 
 ---
 
