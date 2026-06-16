@@ -42,7 +42,7 @@ class SessionManager:
 
             if timed_out:
                 old_thread = thread_id
-                new_thread = f"{chat_id}_{int(now)}"
+                new_thread = f"{chat_id}_{int(now * 1000)}"
                 self._save(chat_id, new_thread, now)
                 return SessionInfo(
                     thread_id=new_thread,
@@ -59,7 +59,7 @@ class SessionManager:
                     chat_id=chat_id,
                 )
         else:
-            thread_id = f"{chat_id}_{int(now)}"
+            thread_id = f"{chat_id}_{int(now * 1000)}"
             self._save(chat_id, thread_id, now)
             return SessionInfo(
                 thread_id=thread_id,
