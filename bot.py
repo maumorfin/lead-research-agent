@@ -31,6 +31,7 @@ from tools.cycling_pcs import get_individual_ranking
 from watcher.poller import RaceWatch, PollResult, run_watcher
 from watcher.dispatcher import dispatch
 from watcher.subscription_store import SubscriptionStore
+from watcher.race_registry import get_live_races, get_upcoming_races, get_race, get_all_races
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -167,7 +168,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• Who won stage 10 of the Giro d'Italia 2026?\n"
         "• Show me the startlist for the Tour de France 2026\n\n"
         "⚙️ Use /model to switch between Claude and Groq\n"
-        "📡 Use /watch to get live race updates\n\n"
+        "📡 Use /watch to subscribe to live race updates\n"
+        "👁 Use /watching to see your subscriptions\n"
+        "🔕 Use /unwatch to remove all subscriptions\n\n"
         "Just type your question and I'll research it for you."
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -188,11 +191,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "<b>Stages</b>\n"
         "• What happened in stage 3 of the Tour de France 2026?\n"
         "• Who won stage 1 of the Vuelta 2026?\n\n"
-        "<b>Live</b>\n"
-        "• What is happening right now in the Giro?\n"
-        "• Who is leading the current stage?\n\n"
+        "<b>Live subscriptions</b>\n"
+        "/watch — subscribe to live race updates\n"
+        "/watching — see your active subscriptions\n"
+        "/unwatch — remove all subscriptions\n\n"
         "Use /model to switch models.\n"
-        "Use /watch to subscribe to live race updates.\n"
         "Use /status for current WorldTour top 5."
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -249,11 +252,119 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Placeholder for Step 7 — /watch command."""
-    await update.message.reply_text(
+    """Show available races with inline buttons to subscribe."""
+    chat_id = update.effective_chat.id
+
+    current_subs = {
+        f"{s.race_slug}_{s.year}_{s.stage}"
+        for s in sub_store.get_subscriptions(chat_id)
+    }
+
+    live_races     = get_live_races()
+    upcoming_races = get_upcoming_races()
+
+    keyboard = []
+
+    if live_races:
+        keyboard.append([InlineKeyboardButton(
+            "── Live now ──", callback_data="watch_header"
+        )])
+        for race in live_races:
+            key        = f"{race.slug}_{race.year}_{race.current_stage}"
+            subscribed = key in current_subs
+            label = (
+                f"{'✅ ' if subscribed else '📡 '}"
+                f"{race.name} — Stage {race.current_stage}"
+            )
+            keyboard.append([InlineKeyboardButton(
+                label,
+                callback_data=f"watch_{race.slug}_{race.year}_{race.current_stage}",
+            )])
+
+    if upcoming_races:
+        keyboard.append([InlineKeyboardButton(
+            "── Coming up ──", callback_data="watch_header"
+        )])
+        for race in upcoming_races:
+            key        = f"{race.slug}_{race.year}_{race.current_stage}"
+            subscribed = key in current_subs
+            label = (
+                f"{'✅ ' if subscribed else '🔔 '}"
+                f"{race.name}"
+            )
+            keyboard.append([InlineKeyboardButton(
+                label,
+                callback_data=f"watch_{race.slug}_{race.year}_{race.current_stage}",
+            )])
+
+    if not keyboard:
+        await update.message.reply_text(
+            "No races available to subscribe to right now.\n"
+            "Check back during the next race.",
+        )
+        return
+
+    text = (
         "📡 <b>Live race updates</b>\n\n"
-        "The /watch feature is coming in the next update.\n"
-        "For now, ask me directly: <i>\"What is happening right now in the Giro?\"</i>",
+        "Subscribe to get notified when something important happens "
+        "during a stage — attacks, crashes, time gaps, stage wins.\n\n"
+        "Tap a race to toggle your subscription:"
+    )
+
+    await update.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def cmd_unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Remove all subscriptions for this user."""
+    chat_id = update.effective_chat.id
+    subs    = sub_store.get_subscriptions(chat_id)
+
+    if not subs:
+        await update.message.reply_text(
+            "You don't have any active subscriptions.\n"
+            "Use /watch to subscribe to a race."
+        )
+        return
+
+    sub_store.unsubscribe(chat_id)
+    race_names = ", ".join(
+        s.race_slug.replace("-", " ").title() for s in subs
+    )
+    await update.message.reply_text(
+        f"✅ Unsubscribed from: {race_names}\n\n"
+        f"Use /watch to subscribe again any time."
+    )
+
+
+async def cmd_watching(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show what races the user is currently subscribed to."""
+    chat_id = update.effective_chat.id
+    subs    = sub_store.get_subscriptions(chat_id)
+
+    if not subs:
+        await update.message.reply_text(
+            "You're not subscribed to any races.\n"
+            "Use /watch to subscribe."
+        )
+        return
+
+    lines = ["📡 <b>Your live subscriptions:</b>\n"]
+    for s in subs:
+        race = get_race(s.race_slug)
+        name = race.name if race else s.race_slug.replace("-", " ").title()
+        lines.append(f"• {name} — Stage {s.stage}")
+
+    lines.append(
+        "\nYou'll get a message when something important happens.\n"
+        "Use /unwatch to remove all subscriptions."
+    )
+
+    await update.message.reply_text(
+        "\n".join(lines),
         parse_mode=ParseMode.HTML,
     )
 
@@ -278,6 +389,62 @@ async def handle_model_callback(
         )
     except ValueError:
         await query.edit_message_text("❌ Unknown model. Please try /model again.")
+
+
+async def handle_watch_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    Handle inline button press from /watch menu.
+    Toggles subscription on/off for the selected race.
+    """
+    query   = update.callback_query
+    await query.answer()
+
+    if query.data == "watch_header":
+        return
+
+    chat_id = query.message.chat_id
+
+    # Parse callback data: "watch_{slug}_{year}_{stage}"
+    parts = query.data.replace("watch_", "", 1).rsplit("_", 2)
+    if len(parts) != 3:
+        await query.edit_message_text("❌ Invalid selection.")
+        return
+
+    race_slug = parts[0]
+    try:
+        year  = int(parts[1])
+        stage = int(parts[2])
+    except ValueError:
+        await query.edit_message_text("❌ Invalid selection.")
+        return
+
+    race = get_race(race_slug)
+    if not race:
+        await query.edit_message_text("❌ Race not found.")
+        return
+
+    existing = sub_store.get_subscribers(race_slug, year, stage)
+
+    if chat_id in existing:
+        sub_store.unsubscribe(chat_id, race_slug)
+        await query.edit_message_text(
+            f"🔕 Unsubscribed from <b>{race.name}</b> Stage {stage}.\n\n"
+            f"Use /watch to subscribe again.",
+            parse_mode=ParseMode.HTML,
+        )
+        logger.info(f"[watch] chat {chat_id} unsubscribed from {race_slug} stage {stage}")
+    else:
+        sub_store.subscribe(chat_id, race_slug, year, stage)
+        await query.edit_message_text(
+            f"✅ Subscribed to <b>{race.name}</b> Stage {stage}!\n\n"
+            f"You'll get a message when something important happens — "
+            f"attacks, crashes, time gaps, stage wins.\n\n"
+            f"Use /unwatch to remove all subscriptions.",
+            parse_mode=ParseMode.HTML,
+        )
+        logger.info(f"[watch] chat {chat_id} subscribed to {race_slug} stage {stage}")
 
 
 # ── Main message handler ──────────────────────────────────────────────────────
@@ -356,9 +523,14 @@ def main() -> None:
     bot_app.add_handler(CommandHandler("help",    cmd_help))
     bot_app.add_handler(CommandHandler("status",  cmd_status))
     bot_app.add_handler(CommandHandler("model",   cmd_model))
-    bot_app.add_handler(CommandHandler("watch",   cmd_watch))
+    bot_app.add_handler(CommandHandler("watch",    cmd_watch))
+    bot_app.add_handler(CommandHandler("unwatch",  cmd_unwatch))
+    bot_app.add_handler(CommandHandler("watching", cmd_watching))
     bot_app.add_handler(
         CallbackQueryHandler(handle_model_callback, pattern="^model_")
+    )
+    bot_app.add_handler(
+        CallbackQueryHandler(handle_watch_callback, pattern="^watch_")
     )
     bot_app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
