@@ -31,7 +31,8 @@ from tools.cycling_pcs import get_individual_ranking
 from watcher.poller import RaceWatch, PollResult, run_watcher
 from watcher.dispatcher import dispatch
 from watcher.subscription_store import SubscriptionStore
-from watcher.race_registry import get_live_races, get_upcoming_races, get_race, get_all_races
+from watcher.race_store import RaceStore
+from watcher.calendar_agent import refresh_calendar
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -47,6 +48,7 @@ _thread_pool = ThreadPoolExecutor(max_workers=4)
 app_graph, user_store = build_graph()
 session_mgr  = SessionManager()
 sub_store    = SubscriptionStore()
+race_store   = RaceStore()
 
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
@@ -96,8 +98,21 @@ async def _watcher_loop() -> None:
     """
     logger.info("[watcher] Background watcher started")
 
+    # Refresh calendar on startup
+    await asyncio.get_event_loop().run_in_executor(
+        _thread_pool,
+        lambda: asyncio.run(refresh_calendar(race_store)),
+    )
+
     while True:
         try:
+            # Refresh calendar if data is stale (runs at most once per 20h)
+            if race_store.needs_refresh():
+                await asyncio.get_event_loop().run_in_executor(
+                    _thread_pool,
+                    lambda: asyncio.run(refresh_calendar(race_store)),
+                )
+
             subscriptions = sub_store.build_subscriptions_dict()
 
             if not subscriptions:
@@ -260,8 +275,8 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         for s in sub_store.get_subscriptions(chat_id)
     }
 
-    live_races     = get_live_races()
-    upcoming_races = get_upcoming_races()
+    live_races     = race_store.get_live()
+    upcoming_races = race_store.get_upcoming()
 
     keyboard = []
 
@@ -354,7 +369,7 @@ async def cmd_watching(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     lines = ["📡 <b>Your live subscriptions:</b>\n"]
     for s in subs:
-        race = get_race(s.race_slug)
+        race = race_store.get(s.race_slug)
         name = race.name if race else s.race_slug.replace("-", " ").title()
         lines.append(f"• {name} — Stage {s.stage}")
 
@@ -420,7 +435,7 @@ async def handle_watch_callback(
         await query.edit_message_text("❌ Invalid selection.")
         return
 
-    race = get_race(race_slug)
+    race = race_store.get(race_slug)
     if not race:
         await query.edit_message_text("❌ Race not found.")
         return
