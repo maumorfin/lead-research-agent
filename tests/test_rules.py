@@ -1,6 +1,6 @@
 """
 Unit tests for the keyword rule engine.
-Run directly: python watcher/test_rules.py
+Run directly: python tests/test_rules.py
 All tests must pass before committing.
 """
 import sys

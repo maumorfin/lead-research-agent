@@ -1,6 +1,6 @@
 """
 Standalone poller test — run this directly to verify polling works.
-Usage: python watcher/test_poller.py
+Usage: python tests/test_poller.py
 Polls every 10 seconds for 3 minutes and prints all results.
 """
 import asyncio

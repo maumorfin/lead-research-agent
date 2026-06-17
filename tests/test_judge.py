@@ -1,6 +1,6 @@
 """
 Judge tests — requires GROQ_API_KEY in .env.
-Run: python watcher/test_judge.py
+Run: python tests/test_judge.py
 """
 import sys
 import os
