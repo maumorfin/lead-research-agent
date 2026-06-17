@@ -48,6 +48,9 @@ class PollResult:
 # Keyed by "{race_slug}_{year}_{stage}" — stores last seen content
 _snapshots: dict[str, str] = {}
 
+# Races that returned 403 on httpx — skip the httpx attempt for these
+_playwright_only: set[str] = {}
+
 
 # ── Content extraction ────────────────────────────────────────────────────────
 
@@ -113,42 +116,93 @@ def _compute_diff(old_content: str, new_content: str) -> str:
     return '. '.join(added[:20])  # cap at 20 new sentences
 
 
-# ── Playwright fallback ───────────────────────────────────────────────────────
+# ── Persistent Playwright browser ────────────────────────────────────────────
+# One browser process shared across all polls — launched on first 403, reused forever.
+
+_pw      = None  # playwright handle
+_browser = None  # chromium browser instance
+
+
+async def _get_browser():
+    """Return the shared browser, launching it if not already running."""
+    global _pw, _browser
+    if _browser is None or not _browser.is_connected():
+        if _pw:
+            try:
+                await _pw.stop()
+            except Exception:
+                pass
+        from playwright.async_api import async_playwright
+        _pw      = await async_playwright().start()
+        _browser = await _pw.chromium.launch(headless=True)
+        logger.info("[poller] Playwright browser launched (persistent)")
+    return _browser
+
+
+async def _scrape_live_page(race_watch: RaceWatch) -> str:
+    """
+    Open a new tab in the persistent browser, scrape the PCS live page,
+    close the tab. The browser itself stays open for the next poll.
+    """
+    url = (
+        f"https://www.procyclingstats.com/race/"
+        f"{race_watch.race_slug}/{race_watch.year}"
+        f"/stage-{race_watch.stage}/live"
+    )
+    browser = await _get_browser()
+    page = await browser.new_page(
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
+    )
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        await page.wait_for_timeout(2000)  # let JS render
+
+        parts = []
+        for label, selector in [
+            ("Race stats", ".racestats, .livestats, [class*='stats']"),
+            ("Situation",  ".situation, [class*='situation']"),
+            ("Timeline",   ".timeline,  [class*='timeline']"),
+        ]:
+            try:
+                text = await page.locator(selector).first.inner_text(timeout=2000)
+                if text.strip():
+                    parts.append(f"{label}:\n{text.strip()}")
+            except Exception:
+                pass
+
+        if not parts:
+            body = await page.inner_text("body")
+            parts.append(body[:3000])
+
+        return "\n\n".join(parts)
+
+    finally:
+        await page.close()
+
 
 async def _poll_with_playwright(
     race_watch: RaceWatch,
     cache_key:  str,
     now:        datetime,
 ) -> PollResult:
-    """
-    Called when httpx gets a 403. Uses Playwright (real browser) to fetch
-    the live page, with Firecrawl as a second fallback if Playwright times out.
-    Runs the sync scraper in a thread pool so it doesn't block the event loop.
-    """
+    """Poll using the persistent browser. No new process launched per call."""
     try:
-        from tools.live_scraper import get_race_situation
-        loop = asyncio.get_event_loop()
-        content = await loop.run_in_executor(
-            None,
-            lambda: get_race_situation(
-                race_watch.race_slug,
-                race_watch.year,
-                race_watch.stage,
-            ),
-        )
+        content = await _scrape_live_page(race_watch)
 
-        if not content or content.startswith("[Playwright failed") or content.startswith("[Firecrawl failed"):
+        if not content or "[error" in content.lower():
             return PollResult(
                 race_watch=race_watch,
                 changed=False, diff="", raw_content="",
-                timestamp=now, error=content,
+                timestamp=now, error=content or "Empty response from Playwright",
             )
-
-        content_hash = _compute_hash(content)
 
         if cache_key not in _snapshots:
             _snapshots[cache_key] = content
-            logger.info(f"[poller] Playwright first snapshot stored for {cache_key}")
+            logger.info(f"[poller] Playwright first snapshot for {cache_key}")
             return PollResult(
                 race_watch=race_watch,
                 changed=False, diff="", raw_content=content,
@@ -156,7 +210,7 @@ async def _poll_with_playwright(
             )
 
         old_content = _snapshots[cache_key]
-        if _compute_hash(old_content) == content_hash:
+        if _compute_hash(old_content) == _compute_hash(content):
             return PollResult(
                 race_watch=race_watch,
                 changed=False, diff="", raw_content=content,
@@ -165,7 +219,7 @@ async def _poll_with_playwright(
 
         diff = _compute_diff(old_content, content)
         _snapshots[cache_key] = content
-        logger.info(f"[poller] Playwright change detected for {cache_key}: {diff[:100]}")
+        logger.info(f"[poller] Change detected ({cache_key}): {diff[:100]}")
 
         return PollResult(
             race_watch=race_watch,
@@ -174,10 +228,11 @@ async def _poll_with_playwright(
         )
 
     except Exception as e:
+        logger.warning(f"[poller] Playwright error for {cache_key}: {e}")
         return PollResult(
             race_watch=race_watch,
             changed=False, diff="", raw_content="",
-            timestamp=now, error=f"Playwright fallback failed: {e}",
+            timestamp=now, error=f"Playwright error: {e}",
         )
 
 
@@ -196,6 +251,11 @@ async def poll_once(race_watch: RaceWatch) -> PollResult:
     cache_key = f"{race_watch.race_slug}_{race_watch.year}_{race_watch.stage}"
     now = datetime.now()
 
+    # Known-blocked races skip httpx entirely — persistent browser already running
+    if cache_key in _playwright_only:
+        logger.debug(f"[poller] {cache_key} → Playwright (bypassing httpx)")
+        return await _poll_with_playwright(race_watch, cache_key, now)
+
     try:
         async with httpx.AsyncClient(
             headers=HEADERS,
@@ -205,7 +265,11 @@ async def poll_once(race_watch: RaceWatch) -> PollResult:
             response = await client.get(url)
 
         if response.status_code == 403:
-            logger.info(f"[poller] httpx blocked (403) for {cache_key} — trying Playwright")
+            _playwright_only.add(cache_key)
+            logger.info(
+                f"[poller] httpx 403 for {cache_key} — "
+                f"added to playwright_only, switching to persistent browser"
+            )
             return await _poll_with_playwright(race_watch, cache_key, now)
 
         if response.status_code != 200:

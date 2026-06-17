@@ -70,11 +70,13 @@ User question
 Every 60 seconds:
       │
       ▼
- Calendar agent  ←── Tavily search + Groq extraction + PCS validation (once per 20h)
+ Calendar agent  ←── PCS homepage scrape (primary, free, no LLM) (once per 20h)
+      │                  └── Tavily+Groq fallback if homepage blocked
       │                  Discovers active races automatically — no manual updates needed
       │
       ▼
   Race poller  ←── httpx GET of PCS live race page
+      │               If 403 → persistent Playwright browser (launched once, reused)
       │               MD5 hash comparison against last snapshot
       │               Extracts diff: only new sentences since last poll
       │
@@ -156,10 +158,9 @@ and struggling. The gap is growing fast — this could decide the stage.
 ### Race calendar
 
 The watcher discovers active races automatically using a daily refresh cycle:
-1. **Tavily search** — finds active races via web search (1 call/day)
-2. **Groq extraction** — parses race names, slugs, stage numbers, live status (1 call/day)
-3. **PCS validation** — confirms each race exists at `procyclingstats.com/race/{slug}/{year}`
-4. **SQLite store** — writes valid races, skips bad data, never deletes existing races
+1. **PCS homepage scrape** (primary) — parses the `hp3-livestats` section on `procyclingstats.com/`. Slugs and stages come directly from PCS hrefs — no LLM, no API cost, 0 errors from hallucination.
+2. **Tavily + Groq fallback** — used only if the homepage is unreachable. 1 Tavily call + 1 Groq call, then PCS validation confirms each result.
+3. **SQLite store** — writes valid races, skips bad data, never deletes existing races.
 
 If a refresh returns zero valid races, the existing data is preserved and the refresh timestamp is not updated (so it retries next cycle).
 
@@ -316,7 +317,7 @@ python tests/test_poller.py
 ## Known Limitations
 
 - **Model choice is in-memory.** Restarting `bot.py` resets model selection to Claude Sonnet, but conversation history, user profiles, and subscriptions survive (SQLite).
-- **PCS blocks plain httpx with 403.** The poller architecture is correct, but PCS requires browser-level headers to serve live content. HTTP 403 is treated as "page exists, access blocked" for PCS validation. A Playwright fallback is planned for the live poller.
+- **PCS blocks plain httpx with 403 on live pages.** The first 403 launches a persistent Chromium browser (one instance, reused for the rest of the session). Subsequent polls for that race skip httpx entirely and go straight to the browser tab — no re-launch per poll.
 - **Groq tool-call reliability.** Llama 3.3 occasionally produces malformed tool call responses (CDATA strings, missing closing tags, array-wrapped JSON). The agent recovers automatically via regex fallback in `llm_client.py`.
 - **Firecrawl is for live races only.** 500 free pages/month. Only called when a race is actively happening.
 - **Playwright requires Chromium.** Run `playwright install chromium` once before using live scraping.
