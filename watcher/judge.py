@@ -12,6 +12,10 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
+# Tracks which users have already received the rate-limit notification this session
+# so we send it once, not every 60 seconds
+_rate_limit_notified: set[int] = set()
+
 
 # ── Data classes ──────────────────────────────────────────────────────────────
 
@@ -153,6 +157,25 @@ Should I notify this user?"""
         return result
 
     except Exception as e:
+        err = str(e)
+        if "429" in err or "rate_limit_exceeded" in err:
+            logger.warning(f"[judge] Groq daily token limit reached for chat {chat_id}")
+            if chat_id not in _rate_limit_notified:
+                _rate_limit_notified.add(chat_id)
+                return JudgeResult(
+                    should_notify=True,
+                    message=(
+                        "⚠️ Live race updates paused — Groq's free daily token limit "
+                        "has been reached. Judge will resume automatically tomorrow.\n\n"
+                        "You're still subscribed — polling continues in the background."
+                    ),
+                    reason="Groq 429 — notifying user once",
+                    confidence="high",
+                )
+            return JudgeResult(
+                should_notify=False, message="",
+                reason="Groq 429 — already notified", confidence="low",
+            )
         logger.error(f"[judge] Failed for chat {chat_id}: {e}")
         return JudgeResult(
             should_notify=False,
