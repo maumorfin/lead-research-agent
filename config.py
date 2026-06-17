@@ -18,12 +18,12 @@ AVAILABLE_MODELS = {
     "haiku": ModelConfig(
         provider="anthropic",
         model_id="claude-haiku-4-5-20251001",
-        display_name="Claude Haiku 4.5 (Anthropic) — faster & cheaper",
+        display_name="Claude Haiku 4.5 (Anthropic) — faster, cheaper",
     ),
     "groq": ModelConfig(
         provider="groq",
         model_id="llama-3.3-70b-versatile",
-        display_name="Llama 3.3 70B (Groq) — free & fast",
+        display_name="Llama 3.3 70B (Groq) — free, fast",
     ),
 }
 

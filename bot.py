@@ -260,7 +260,7 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     current = get_model(chat_id)
     await update.message.reply_text(
-        f"Current model: <b>{current.display_name}</b>\n\nChoose a model:",
+        f"Current model: <b>{html.escape(current.display_name)}</b>\n\nChoose a model:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=ParseMode.HTML,
     )
@@ -403,7 +403,7 @@ async def handle_model_callback(
     try:
         model = set_model(chat_id, key)
         await query.edit_message_text(
-            f"✅ Switched to <b>{model.display_name}</b>\n\n"
+            f"✅ Switched to <b>{html.escape(model.display_name)}</b>\n\n"
             f"All questions in this chat will use this model.",
             parse_mode=ParseMode.HTML,
         )
