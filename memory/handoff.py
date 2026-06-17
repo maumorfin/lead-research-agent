@@ -1,6 +1,9 @@
+import logging
 from memory.user_store import UserStore
-from config import get_model
 from agent.llm_client import call_llm
+from config import AVAILABLE_MODELS
+
+logger = logging.getLogger(__name__)
 
 
 EXTRACTION_TOOLS = [
@@ -70,7 +73,7 @@ def run_handoff(
         )
 
         result = call_llm(
-            model_config=get_model(chat_id),
+            model_config=AVAILABLE_MODELS["groq"],
             system_prompt=EXTRACTION_PROMPT,
             user_message=f"Conversation to extract from:\n\n{conversation}",
             tools=EXTRACTION_TOOLS,
@@ -80,4 +83,4 @@ def run_handoff(
         user_store.update(chat_id, result["input"])
 
     except Exception as e:
-        print(f"[handoff] Failed for thread {old_thread_id}: {e}")
+        logger.error(f"[handoff] Failed for thread {old_thread_id}: {e}")
