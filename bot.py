@@ -10,7 +10,13 @@ from rich.console import Console
 sys.path.insert(0, os.path.dirname(__file__))
 load_dotenv()
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -42,6 +48,13 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 bot_app = None  # set in main(), used by _send_message
+
+# ── Persistent reply keyboard ─────────────────────────────────────────────────
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [[KeyboardButton("⚙️ Change Model"), KeyboardButton("📡 Watch Race")]],
+    resize_keyboard=True,
+    is_persistent=True,
+)
 
 # ── Shared instances ──────────────────────────────────────────────────────────
 _thread_pool = ThreadPoolExecutor(max_workers=4)
@@ -188,7 +201,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🔕 Use /unwatch to remove all subscriptions\n\n"
         "Just type your question and I'll research it for you."
     )
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+    await update.message.reply_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=MAIN_KEYBOARD,
+    )
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -476,6 +493,14 @@ async def handle_message(
     chat_id  = update.effective_chat.id
 
     if not question:
+        return
+
+    # Persistent keyboard button shortcuts
+    if question == "⚙️ Change Model":
+        await cmd_model(update, context)
+        return
+    if question == "📡 Watch Race":
+        await cmd_watch(update, context)
         return
 
     await context.bot.send_chat_action(
