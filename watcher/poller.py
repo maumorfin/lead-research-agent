@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 
+
 logger = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -112,6 +113,74 @@ def _compute_diff(old_content: str, new_content: str) -> str:
     return '. '.join(added[:20])  # cap at 20 new sentences
 
 
+# ── Playwright fallback ───────────────────────────────────────────────────────
+
+async def _poll_with_playwright(
+    race_watch: RaceWatch,
+    cache_key:  str,
+    now:        datetime,
+) -> PollResult:
+    """
+    Called when httpx gets a 403. Uses Playwright (real browser) to fetch
+    the live page, with Firecrawl as a second fallback if Playwright times out.
+    Runs the sync scraper in a thread pool so it doesn't block the event loop.
+    """
+    try:
+        from tools.live_scraper import get_race_situation
+        loop = asyncio.get_event_loop()
+        content = await loop.run_in_executor(
+            None,
+            lambda: get_race_situation(
+                race_watch.race_slug,
+                race_watch.year,
+                race_watch.stage,
+            ),
+        )
+
+        if not content or content.startswith("[Playwright failed") or content.startswith("[Firecrawl failed"):
+            return PollResult(
+                race_watch=race_watch,
+                changed=False, diff="", raw_content="",
+                timestamp=now, error=content,
+            )
+
+        content_hash = _compute_hash(content)
+
+        if cache_key not in _snapshots:
+            _snapshots[cache_key] = content
+            logger.info(f"[poller] Playwright first snapshot stored for {cache_key}")
+            return PollResult(
+                race_watch=race_watch,
+                changed=False, diff="", raw_content=content,
+                timestamp=now, error=None,
+            )
+
+        old_content = _snapshots[cache_key]
+        if _compute_hash(old_content) == content_hash:
+            return PollResult(
+                race_watch=race_watch,
+                changed=False, diff="", raw_content=content,
+                timestamp=now, error=None,
+            )
+
+        diff = _compute_diff(old_content, content)
+        _snapshots[cache_key] = content
+        logger.info(f"[poller] Playwright change detected for {cache_key}: {diff[:100]}")
+
+        return PollResult(
+            race_watch=race_watch,
+            changed=True, diff=diff, raw_content=content,
+            timestamp=now, error=None,
+        )
+
+    except Exception as e:
+        return PollResult(
+            race_watch=race_watch,
+            changed=False, diff="", raw_content="",
+            timestamp=now, error=f"Playwright fallback failed: {e}",
+        )
+
+
 # ── Core poll function ────────────────────────────────────────────────────────
 
 async def poll_once(race_watch: RaceWatch) -> PollResult:
@@ -136,14 +205,8 @@ async def poll_once(race_watch: RaceWatch) -> PollResult:
             response = await client.get(url)
 
         if response.status_code == 403:
-            return PollResult(
-                race_watch=race_watch,
-                changed=False,
-                diff="",
-                raw_content="",
-                timestamp=now,
-                error="403 blocked — httpx may need rotation or Playwright fallback",
-            )
+            logger.info(f"[poller] httpx blocked (403) for {cache_key} — trying Playwright")
+            return await _poll_with_playwright(race_watch, cache_key, now)
 
         if response.status_code != 200:
             return PollResult(
