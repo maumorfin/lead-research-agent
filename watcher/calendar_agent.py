@@ -189,6 +189,156 @@ def _confirm_on_pcs(slug: str, year: int) -> bool:
         return False
 
 
+# ── PCS homepage scraper (primary source) ────────────────────────────────────
+
+def _fetch_from_pcs_homepage(race_store: RaceStore) -> list[dict] | None:
+    """
+    Scrape the PCS homepage live stats section.
+    This is the primary and most reliable source — slugs and stages come
+    directly from PCS hrefs, so no Groq extraction or PCS confirmation needed.
+
+    href format: race/{slug}/{year}/stage-{N}/live
+    Returns list of race dicts, or None if the page is blocked/unavailable.
+    """
+    try:
+        from bs4 import BeautifulSoup
+        response = httpx.get(
+            "https://www.procyclingstats.com/",
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+            },
+            timeout=10,
+            follow_redirects=True,
+        )
+
+        if response.status_code != 200:
+            logger.warning(f"[calendar] PCS homepage returned {response.status_code}")
+            return None
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        livestats = soup.find("ul", class_="hp3-livestats")
+        if not livestats:
+            logger.warning("[calendar] PCS homepage: hp3-livestats section not found")
+            return None
+
+        races = []
+        for li in livestats.find_all("li"):
+            a = li.find("a")
+            if not a:
+                continue
+
+            href = a.get("href", "").strip("/")
+            text = li.get_text(strip=True)
+
+            # href: race/{slug}/{year}/stage-{N}/live
+            parts = href.split("/")
+            if len(parts) < 4 or parts[0] != "race":
+                continue
+
+            slug = parts[1]
+            try:
+                year = int(parts[2])
+            except (ValueError, IndexError):
+                continue
+
+            if year not in VALID_YEARS:
+                continue
+
+            try:
+                stage = int(parts[3].replace("stage-", ""))
+            except (ValueError, IndexError):
+                stage = 1
+
+            # "live..." = stage is racing now; "soon..." = starts today
+            is_live = text.startswith("live")
+
+            # Extract name: strip "live"/"soon" prefix, take everything before "|"
+            name_raw = text[4:].split("|")[0].strip()  # skip 4-char prefix
+            name = name_raw if len(name_raw) >= 3 else slug.replace("-", " ").title()
+
+            # Preserve existing total_stages from store if known
+            existing = race_store.get(slug)
+            total_stages = existing.total_stages if existing and existing.total_stages > 1 else 21
+
+            races.append({
+                "slug":          slug,
+                "name":          name,
+                "year":          year,
+                "current_stage": stage,
+                "total_stages":  total_stages,
+                "is_live":       is_live,
+            })
+
+            status = "LIVE" if is_live else "soon"
+            logger.info(f"[calendar] PCS: {status}  {name}  stage {stage}  ({slug})")
+
+        return races if races else None
+
+    except Exception as e:
+        logger.error(f"[calendar] PCS homepage scrape failed: {e}")
+        return None
+
+
+# ── Tavily + Groq fallback ────────────────────────────────────────────────────
+
+def _fetch_from_tavily_groq() -> list[dict] | None:
+    """
+    Fallback: Tavily search + Groq extraction.
+    Used when PCS homepage is blocked or returns no results.
+    Costs 1 Tavily call + 1 Groq call.
+    """
+    try:
+        from tools.web_search import search
+        results = search(
+            f"professional cycling race live today stage {CURRENT_YEAR}",
+            max_results=8,
+        )
+        if not results:
+            logger.warning("[calendar] Tavily returned no results")
+            return None
+
+        for i, r in enumerate(results, 1):
+            logger.info(f"[calendar] Tavily result {i}: {r.url}")
+
+        search_text = "\n\n".join(
+            f"[{r.title}]\n{r.content}" for r in results
+        )
+
+    except Exception as e:
+        logger.error(f"[calendar] Tavily search failed: {e}")
+        return None
+
+    try:
+        from agent.llm_client import call_llm
+        from config import ModelConfig
+
+        result = call_llm(
+            model_config=ModelConfig(
+                provider="groq",
+                model_id="llama-3.3-70b-versatile",
+                display_name="Groq (calendar fallback)",
+            ),
+            system_prompt=EXTRACTION_PROMPT,
+            user_message=f"Search results from today:\n\n{search_text}",
+            tools=EXTRACTION_TOOL,
+            max_tokens=1000,
+        )
+
+        races = result["input"].get("races", [])
+        logger.info(f"[calendar] Groq extracted {len(races)} races (Tavily fallback)")
+        return races if races else None
+
+    except Exception as e:
+        logger.error(f"[calendar] Groq extraction failed: {e}")
+        return None
+
+
 # ── Main refresh function ─────────────────────────────────────────────────────
 
 async def refresh_calendar(
@@ -197,6 +347,8 @@ async def refresh_calendar(
 ) -> int:
     """
     Discover active cycling races and update the race store.
+    Primary source: PCS homepage (free, authoritative, no LLM needed).
+    Fallback: Tavily search + Groq extraction (1 call each).
 
     Args:
         race_store: RaceStore instance to write to
@@ -211,83 +363,39 @@ async def refresh_calendar(
 
     logger.info("[calendar] Starting calendar refresh...")
 
-    # ── Step 1: Search Tavily ─────────────────────────────────────────────────
-    try:
-        from tools.web_search import search
-        results = search(
-            f"professional cycling race live today stage {CURRENT_YEAR}",
-            max_results=8,
-        )
-        if not results:
-            logger.warning("[calendar] Tavily returned no results")
-            return 0
-
-        for i, r in enumerate(results, 1):
-            logger.info(f"[calendar] Tavily result {i}: {r.url}")
-
-        search_text = "\n\n".join(
-            f"[{r.title}]\n{r.content}" for r in results
-        )
-        logger.info(f"[calendar] Tavily returned {len(results)} results")
-
-    except Exception as e:
-        logger.error(f"[calendar] Tavily search failed: {e}")
-        return 0
-
-    # ── Step 2: Groq extraction ───────────────────────────────────────────────
-    try:
-        from agent.llm_client import call_llm
-        from config import ModelConfig
-
-        groq_config = ModelConfig(
-            provider="groq",
-            model_id="llama-3.3-70b-versatile",
-            display_name="Groq (calendar agent)",
-        )
-
-        result = call_llm(
-            model_config=groq_config,
-            system_prompt=EXTRACTION_PROMPT,
-            user_message=f"Search results from today:\n\n{search_text}",
-            tools=EXTRACTION_TOOL,
-            max_tokens=1000,
-        )
-
-        races = result["input"].get("races", [])
-        logger.info(f"[calendar] Groq extracted {len(races)} races")
-
-    except Exception as e:
-        logger.error(f"[calendar] Groq extraction failed: {e}")
-        return 0
+    # ── Primary: scrape PCS homepage directly ─────────────────────────────────
+    races = _fetch_from_pcs_homepage(race_store)
+    pcs_source = races is not None
 
     if not races:
-        logger.warning("[calendar] No races extracted — keeping existing data")
+        logger.warning("[calendar] PCS homepage unavailable — falling back to Tavily+Groq")
+        races = _fetch_from_tavily_groq()
+
+    if not races:
+        logger.warning("[calendar] No races found from any source — keeping existing data")
         return 0
 
-    # ── Step 3: Validate and write ────────────────────────────────────────────
+    # ── Validate and write ────────────────────────────────────────────────────
     valid_count = 0
-
-    # Mark all existing races not live — only this refresh's confirmed races get re-marked
     race_store.mark_all_not_live()
 
     for race in races:
-        race["slug"] = _normalize_slug(race.get("slug", ""), race.get("name", ""))
+        # Normalize slug only for Tavily/Groq results (PCS slugs are already correct)
+        if not pcs_source:
+            race["slug"] = _normalize_slug(race.get("slug", ""), race.get("name", ""))
 
-        # Layer 1 — sanity checks
+        # Sanity check
         valid, reason = _sanity_check(race)
         if not valid:
-            logger.warning(f"[calendar] Sanity check failed for {race.get('name')}: {reason}")
+            logger.warning(f"[calendar] Skipping {race.get('name')}: {reason}")
             continue
 
-        # Layer 2 — PCS confirmation
-        if not _confirm_on_pcs(race["slug"], race["year"]):
-            logger.warning(
-                f"[calendar] PCS confirmation failed for "
-                f"{race['slug']}/{race['year']} — discarding"
-            )
+        # PCS confirmation only needed for Tavily/Groq results
+        # (PCS homepage races are already confirmed — they came from PCS)
+        if not pcs_source and not _confirm_on_pcs(race["slug"], race["year"]):
+            logger.warning(f"[calendar] PCS rejected {race['slug']}/{race['year']}")
             continue
 
-        # Layer 3 — write to store
         try:
             race_store.upsert(
                 slug=race["slug"],
@@ -300,20 +408,16 @@ async def refresh_calendar(
             valid_count += 1
             logger.info(
                 f"[calendar] Wrote: {race['name']} "
-                f"stage {race['current_stage']} "
-                f"live={race['is_live']}"
+                f"stage {race['current_stage']} live={race['is_live']}"
             )
         except Exception as e:
             logger.error(f"[calendar] Write failed for {race.get('name')}: {e}")
 
-    # Update refresh timestamp only if at least one race was valid
     if valid_count > 0:
         race_store.set_last_refresh()
-        logger.info(f"[calendar] Refresh complete — {valid_count} valid races written")
+        source = "PCS homepage" if pcs_source else "Tavily+Groq fallback"
+        logger.info(f"[calendar] Refresh complete — {valid_count} races written via {source}")
     else:
-        logger.warning(
-            "[calendar] Zero valid races after validation — "
-            "keeping existing data, not updating refresh timestamp"
-        )
+        logger.warning("[calendar] Zero valid races — keeping existing data")
 
     return valid_count
