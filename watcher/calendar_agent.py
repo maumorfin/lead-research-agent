@@ -147,17 +147,24 @@ def _sanity_check(race: dict) -> tuple[bool, str]:
     if year not in VALID_YEARS:
         return False, f"Invalid year: {year}"
 
-    if not (1 <= stage <= MAX_STAGE):
-        return False, f"Invalid stage: {stage}"
-
-    if not (1 <= total <= MAX_STAGE):
-        return False, f"Invalid total stages: {total}"
-
     if not name or len(name) < 3:
         return False, f"Name too short: '{name}'"
 
-    if stage > total:
-        return False, f"Stage {stage} > total {total}"
+    # current_stage=0 means Groq couldn't determine it — default to 1 (acceptable)
+    if stage == 0:
+        race["current_stage"] = 1
+        stage = 1
+
+    if not (1 <= stage <= MAX_STAGE):
+        return False, f"Invalid stage: {stage}"
+
+    # total_stages=0 means Groq couldn't determine it — default to 21 (grand tour assumption)
+    if total == 0:
+        race["total_stages"] = 21
+        total = 21
+
+    if not (1 <= total <= MAX_STAGE):
+        return False, f"Invalid total stages: {total}"
 
     return True, "ok"
 
@@ -209,11 +216,14 @@ async def refresh_calendar(
         from tools.web_search import search
         results = search(
             f"professional cycling race live today stage {CURRENT_YEAR}",
-            max_results=5,
+            max_results=8,
         )
         if not results:
             logger.warning("[calendar] Tavily returned no results")
             return 0
+
+        for i, r in enumerate(results, 1):
+            logger.info(f"[calendar] Tavily result {i}: {r.url}")
 
         search_text = "\n\n".join(
             f"[{r.title}]\n{r.content}" for r in results
