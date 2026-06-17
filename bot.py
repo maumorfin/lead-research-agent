@@ -270,6 +270,11 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show available races with inline buttons to subscribe."""
     chat_id = update.effective_chat.id
 
+    # Always pull fresh data when the user opens the menu — the PCS homepage
+    # scrape is free and fast (~200ms), so "soon" → "live" transitions appear
+    # immediately without waiting for the 20-hour background refresh cycle.
+    await refresh_calendar(race_store, force=True)
+
     current_subs = {
         f"{s.race_slug}_{s.year}_{s.stage}"
         for s in sub_store.get_subscriptions(chat_id)

@@ -49,7 +49,7 @@ class PollResult:
 _snapshots: dict[str, str] = {}
 
 # Races that returned 403 on httpx — skip the httpx attempt for these
-_playwright_only: set[str] = {}
+_playwright_only: set[str] = set()
 
 
 # ── Content extraction ────────────────────────────────────────────────────────
