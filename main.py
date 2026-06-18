@@ -7,6 +7,8 @@ from rich.panel import Panel
 sys.path.insert(0, os.path.dirname(__file__))
 load_dotenv()
 
+os.environ.setdefault("LANGGRAPH_ALLOWED_MSGPACK_MODULES", "models.plan,models.answer")
+
 from agent.graph import build_graph
 from memory.session_manager import SessionManager
 from memory.handoff import run_handoff

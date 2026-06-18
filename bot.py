@@ -10,6 +10,9 @@ from rich.console import Console
 sys.path.insert(0, os.path.dirname(__file__))
 load_dotenv()
 
+# Register custom types so LangGraph's msgpack serializer doesn't warn
+os.environ.setdefault("LANGGRAPH_ALLOWED_MSGPACK_MODULES", "models.plan,models.answer")
+
 from telegram import (
     Update,
     InlineKeyboardButton,
