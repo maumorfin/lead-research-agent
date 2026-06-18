@@ -5,16 +5,10 @@ Called only when the rule engine passes a diff (roughly 10% of polls).
 Decision: is this diff worth interrupting the user for?
 Output:   yes/no + a short Telegram-ready message if yes.
 """
-import json
 import logging
-import os
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
-
-# Tracks which users have already received the rate-limit notification this session
-# so we send it once, not every 60 seconds
-_rate_limit_notified: set[int] = set()
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -110,12 +104,8 @@ def judge_event(
     so failures are always safe (no spurious notifications).
     """
     try:
-        from openai import OpenAI
-
-        client = OpenAI(
-            api_key=os.environ["GROQ_API_KEY"],
-            base_url="https://api.groq.com/openai/v1",
-        )
+        from agent.llm_client import call_llm
+        from config import AVAILABLE_MODELS
 
         race_name    = race_slug.replace("-", " ").title()
         user_context = _format_user_context(user_profile)
@@ -127,20 +117,15 @@ Latest update from live ticker:
 
 Should I notify this user?"""
 
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": user_message},
-            ],
+        result_raw = call_llm(
+            model_config=AVAILABLE_MODELS["haiku"],
+            system_prompt=SYSTEM_PROMPT,
+            user_message=user_message,
             tools=JUDGE_TOOLS,
-            tool_choice="required",
             max_tokens=300,
-            temperature=0.2,   # low temp = consistent decisions
         )
 
-        tool_call = response.choices[0].message.tool_calls[0]
-        data      = json.loads(tool_call.function.arguments)
+        data = result_raw["input"]
 
         result = JudgeResult(
             should_notify=data["should_notify"],
@@ -157,25 +142,6 @@ Should I notify this user?"""
         return result
 
     except Exception as e:
-        err = str(e)
-        if "429" in err or "rate_limit_exceeded" in err:
-            logger.warning(f"[judge] Groq daily token limit reached for chat {chat_id}")
-            if chat_id not in _rate_limit_notified:
-                _rate_limit_notified.add(chat_id)
-                return JudgeResult(
-                    should_notify=True,
-                    message=(
-                        "⚠️ Live race updates paused — Groq's free daily token limit "
-                        "has been reached. Judge will resume automatically tomorrow.\n\n"
-                        "You're still subscribed — polling continues in the background."
-                    ),
-                    reason="Groq 429 — notifying user once",
-                    confidence="high",
-                )
-            return JudgeResult(
-                should_notify=False, message="",
-                reason="Groq 429 — already notified", confidence="low",
-            )
         logger.error(f"[judge] Failed for chat {chat_id}: {e}")
         return JudgeResult(
             should_notify=False,
