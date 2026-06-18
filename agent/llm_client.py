@@ -79,18 +79,22 @@ def _call_groq(model_id, system_prompt, user_message, tools, max_tokens):
 
     except BadRequestError as e:
         # Groq/Llama emits tool calls in non-standard formats. Variants seen:
-        #   <function=name>{...}</function>      (space + closing tag)
-        #   <function=name [{...}]               (array-wrapped, no closing tag)
-        #   <function=name{...}</function>        (no separator between name and JSON)
-        # One regex covers all: optional separator [>\s]* between name and payload.
+        #   <function=name>{...}</function>
+        #   <function=name [{...}]>              (array-wrapped)
+        #   <function=name{...}</function>
+        # Also: Groq sometimes escapes apostrophes as \' which is invalid JSON.
         body   = e.body or {}
         failed = body.get("error", {}).get("failed_generation", "")
 
         m = re.search(r"<function=(\w+)[>\s]*(\{.+\}|\[.+\])", failed, re.DOTALL)
         if m:
-            data = json.loads(m.group(2))
-            if isinstance(data, list) and data:
-                data = data[0]
-            return {"name": m.group(1), "input": data}
+            try:
+                payload = m.group(2).replace("\\'", "'")
+                data = json.loads(payload)
+                if isinstance(data, list) and data:
+                    data = data[0]
+                return {"name": m.group(1), "input": data}
+            except (json.JSONDecodeError, KeyError, IndexError):
+                pass  # fall through to raise
 
         raise
