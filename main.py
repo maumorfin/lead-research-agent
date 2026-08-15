@@ -1,135 +1,98 @@
 import sys
+import os
 from dotenv import load_dotenv
 from rich.console import Console
-from rich.table import Table
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from agent.planner import create_plan
-from agent.executor import execute_plan
-from agent.synthesizer import synthesize
-from models.lead import LeadProfile
-
+sys.path.insert(0, os.path.dirname(__file__))
 load_dotenv()
+
+os.environ.setdefault("LANGGRAPH_ALLOWED_MSGPACK_MODULES", "models.plan,models.answer")
+
+from agent.graph import build_graph
+from memory.session_manager import SessionManager
+from memory.handoff import run_handoff
+
 console = Console()
-
-SAMPLE_COMPANIES = ["Stripe", "Linear", "Vercel"]
-
-
-def research_company(company_name: str) -> LeadProfile:
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-        transient=True,
-    ) as progress:
-        task = progress.add_task(
-            f"[cyan]Planning research for {company_name}...", total=None
-        )
-        plan = create_plan(company_name)
-
-        progress.update(
-            task,
-            description=f"[yellow]Executing {len(plan.steps)} research steps for {company_name}...",
-        )
-        findings = execute_plan(plan)
-
-        progress.update(task, description=f"[green]Synthesizing profile for {company_name}...")
-        profile = synthesize(company_name, findings)
-
-    return profile
+app_graph, user_store = build_graph()
+session_mgr = SessionManager()
 
 
-def display_profile(profile: LeadProfile) -> None:
-    score = profile.qualification_score
-    color = "green" if score >= 7 else "yellow" if score >= 4 else "red"
+def run_agent(question: str, chat_id: int = 0):
+    console.print(Panel(
+        f"[bold]{question}[/bold]",
+        title="[blue]Cycling Agent[/blue]",
+        border_style="blue",
+    ))
 
-    console.print(
-        Panel(
-            f"[bold]{profile.company_name}[/bold]\n"
-            f"[dim]{profile.description or 'No description found'}[/dim]\n\n"
-            f"Industry: {profile.industry or '—'} | "
-            f"Size: {profile.employee_count_estimate or '—'} | "
-            f"Founded: {profile.founding_year or '—'}\n"
-            f"HQ: {profile.headquarters or '—'} | "
-            f"Website: {profile.website or '—'}\n"
-            f"Funding: {profile.funding_info or '—'} | "
-            f"Hiring: {'Yes' if profile.is_hiring else 'No' if profile.is_hiring is False else '—'}",
-            title=f"[{color}]Score: {score}/10[/{color}]",
-            border_style=color,
-        )
+    session = session_mgr.get_or_create(chat_id)
+
+    if session.is_new and session.old_thread_id:
+        console.print("[dim]Running session handoff...[/dim]")
+        run_handoff(session.old_thread_id, chat_id, app_graph, user_store)
+
+    result = app_graph.invoke(
+        {
+            "question":          question,
+            "resolved_question": "",
+            "chat_id":           chat_id,
+            "messages":          [],
+            "findings":          {},
+            "plan":              None,
+            "answer":            None,
+        },
+        config={"configurable": {"thread_id": session.thread_id}},
     )
 
-    if profile.key_people:
-        console.print("[bold]Key People:[/bold]")
-        for person in profile.key_people:
-            console.print(f"  • {person.name} — {person.title}")
-
-    if profile.tech_stack:
-        console.print(f"\n[bold]Tech Stack:[/bold] {', '.join(profile.tech_stack)}")
-
-    if profile.talking_points:
-        console.print("\n[bold]Talking Points:[/bold]")
-        for point in profile.talking_points:
-            console.print(f"  → {point}")
-
-    if profile.recent_news:
-        console.print("\n[bold]Recent News:[/bold]")
-        for news in profile.recent_news[:3]:
-            console.print(f"  • {news}")
-
-    console.print(
-        f"\n[dim italic]Reasoning: {profile.qualification_reasoning}[/dim italic]"
+    answer = result["answer"]
+    color  = (
+        "green"  if answer.confidence == "high"   else
+        "yellow" if answer.confidence == "medium" else
+        "red"
     )
+
+    console.print(Panel(
+        answer.answer,
+        title=f"[{color}]Answer — {answer.confidence}[/{color}]",
+        border_style=color,
+    ))
+
+    if answer.data_points:
+        console.print("\n[bold]Key Facts:[/bold]")
+        for p in answer.data_points:
+            console.print(f"  • {p}")
+
+    if answer.follow_up_suggestions:
+        console.print("\n[bold]You might also ask:[/bold]")
+        for i, s in enumerate(answer.follow_up_suggestions, 1):
+            console.print(f"  {i}. {s}")
+
+    if answer.source_note:
+        console.print(f"\n[dim italic]{answer.source_note}[/dim italic]")
+
+    profile = user_store.get(chat_id)
+    if profile:
+        console.print(f"\n[dim]User profile: {profile}[/dim]")
+
     console.print()
+    return answer
 
 
-def print_summary_table(profiles: list[LeadProfile]) -> None:
-    table = Table(title="Lead Summary", show_header=True, header_style="bold blue")
-    table.add_column("Company", style="bold")
-    table.add_column("Industry")
-    table.add_column("Size")
-    table.add_column("Score", justify="center")
-    table.add_column("Verdict", justify="center")
-
-    for p in sorted(profiles, key=lambda x: x.qualification_score, reverse=True):
-        score = p.qualification_score
-        color = "green" if score >= 7 else "yellow" if score >= 4 else "red"
-        verdict = "✓ Pursue" if score >= 7 else "~ Maybe" if score >= 4 else "✗ Pass"
-        table.add_row(
-            p.company_name,
-            p.industry or "—",
-            p.employee_count_estimate or "—",
-            f"[{color}]{score}[/{color}]",
-            f"[{color}]{verdict}[/{color}]",
-        )
-
-    console.print(table)
-
-
-def main() -> None:
-    companies = sys.argv[1:] if len(sys.argv) > 1 else SAMPLE_COMPANIES
-
-    console.print(
-        Panel(
-            f"Researching [bold]{len(companies)}[/bold] "
-            f"{'company' if len(companies) == 1 else 'companies'}: "
-            f"{', '.join(companies)}",
-            title="[bold blue]Lead Research Agent[/bold blue]",
+def main():
+    if len(sys.argv) < 2:
+        console.print(Panel(
+            "Usage: [bold]python main.py \"Your question\"[/bold]\n\n"
+            "Examples:\n"
+            "  python main.py \"Who leads the WorldTour?\"\n"
+            "  python main.py \"Show me Pogačar's 2026 results\"\n"
+            "  python main.py \"What happened in stage 5 of the Giro 2026?\"",
+            title="Cycling Agent",
             border_style="blue",
-        )
-    )
-    console.print()
+        ))
+        sys.exit(0)
 
-    profiles: list[LeadProfile] = []
-    for company in companies:
-        console.rule(f"[bold]{company}[/bold]")
-        profile = research_company(company)
-        display_profile(profile)
-        profiles.append(profile)
-
-    console.rule("[bold blue]Summary[/bold blue]")
-    print_summary_table(profiles)
+    question = " ".join(sys.argv[1:])
+    run_agent(question, chat_id=0)
 
 
 if __name__ == "__main__":

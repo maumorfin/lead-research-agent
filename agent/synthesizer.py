@@ -1,49 +1,68 @@
-from anthropic import Anthropic
-from models.lead import LeadProfile
+from config import get_model
+from agent.llm_client import call_llm
+from models.answer import CyclingAnswer
 
-client = Anthropic()
+SYSTEM_PROMPT = """You are a knowledgeable professional cycling commentator and analyst.
+You have been given raw data fetched from procyclingstats.com and web searches.
+Synthesize this into a clear, accurate, engaging answer.
 
-SYSTEM_PROMPT = """You are a B2B sales analyst reviewing raw research about a company.
-Your job is to extract key facts and produce a structured lead profile.
+Guidelines:
+- Be precise with numbers, dates, and rider names
+- Use proper cycling terminology naturally (GC, peloton, domestique, jersey, etc.)
+- If data is missing or a race hasn't happened yet, say so clearly — never invent facts
+- Suggest 2-3 relevant follow-up questions the user would genuinely find interesting
+- Keep the main answer concise but complete (3-6 sentences for simple questions)
+- Set confidence to "low" if data seems outdated, incomplete, or contradictory
+- Set confidence to "high" only when you have complete, structured data
+- Always fill source_note with where the data came from"""
 
-Score the lead from 0 to 10 based on:
-- Company size and growth trajectory (larger / faster growing = higher score)
-- Budget signals: funding rounds, revenue mentions, or enterprise clients
-- Visibility of decision-makers (named CTO/VP Eng = easier to reach)
-- Relevance to a software development agency (do they buy tech services?)
+# Flat schema — no $defs/$ref so it works with both Anthropic and Groq
+_ANSWER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "question": {"type": "string", "description": "The original user question"},
+        "answer": {"type": "string", "description": "Main answer in clear prose, 3-6 sentences"},
+        "data_points": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Key facts as short bullet points",
+        },
+        "source_note": {"type": "string", "description": "Where the data came from"},
+        "follow_up_suggestions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "2-3 related questions the user might ask next",
+        },
+        "confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"],
+            "description": "high=complete fresh data, medium=partial, low=outdated or missing",
+        },
+    },
+    "required": ["question", "answer", "data_points", "follow_up_suggestions", "confidence"],
+}
 
-Score conservatively: 7+ means actively worth a cold email. Be factual — if you did not find something, leave it null."""
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "submit_cycling_answer",
+            "description": "Submit the final structured cycling answer",
+            "parameters": _ANSWER_SCHEMA,
+        },
+    }
+]
 
 
-def synthesize(company_name: str, raw_findings: dict[str, str]) -> LeadProfile:
+def synthesize(question: str, raw_findings: dict[str, str], chat_id: int = 0) -> CyclingAnswer:
     findings_text = "\n\n---\n\n".join(
         f"**{topic}**\n{content}" for topic, content in raw_findings.items()
     )
-
-    tools = [
-        {
-            "name": "submit_lead_profile",
-            "description": "Submit the structured lead profile",
-            "input_schema": LeadProfile.model_json_schema(),
-        }
-    ]
-
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
+    result = call_llm(
+        model_config=get_model(chat_id),
+        system_prompt=SYSTEM_PROMPT,
+        user_message=f"Question: {question}\n\nResearch findings:\n\n{findings_text}",
+        tools=TOOLS,
         max_tokens=3000,
-        system=SYSTEM_PROMPT,
-        tools=tools,
-        tool_choice={"type": "any"},
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"Company: {company_name}\n\n"
-                    f"Raw research findings:\n\n{findings_text}"
-                ),
-            }
-        ],
     )
-
-    tool_use_block = next(b for b in response.content if b.type == "tool_use")
-    return LeadProfile(**tool_use_block.input)
+    return CyclingAnswer(**result["input"])

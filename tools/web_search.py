@@ -12,11 +12,7 @@ class SearchResult:
 
 def search(query: str, max_results: int = 5) -> list[SearchResult]:
     client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
-    response = client.search(
-        query=query,
-        max_results=max_results,
-        search_depth="basic",
-    )
+    response = client.search(query=query, max_results=max_results, search_depth="basic")
     return [
         SearchResult(
             title=r.get("title", ""),
